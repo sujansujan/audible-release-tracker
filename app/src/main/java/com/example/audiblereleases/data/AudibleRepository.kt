@@ -47,7 +47,7 @@ class AudibleRepository {
             }
             .build()
         val request = Request.Builder().url(url).header("User-Agent", "AudibleReleaseTracker/1.0 (personal use)").build()
-        http.newCall(request).execute().use { response ->
+        return http.newCall(request).execute().use { response ->
             if (!response.isSuccessful) error("Audible catalog API returned HTTP ${response.code}")
             val root = JSONObject(response.body?.string().orEmpty())
             val products = root.optJSONArray("products") ?: return emptyList()
