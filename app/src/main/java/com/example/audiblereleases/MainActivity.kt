@@ -13,7 +13,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -50,7 +52,7 @@ private val Amber = Color(0xFFFFB86C)
 private val SquareShape = RoundedCornerShape(0.dp)
 
 @Composable private fun PlainTextTheme(dark: Boolean, content: @Composable () -> Unit) {
-    val scheme = if (dark) darkColorScheme(background = DraculaBackground, surface = DraculaBackground, surfaceVariant = Color(0xFF44475A), primary = DraculaLink, onBackground = DraculaInk, onSurface = DraculaInk, outline = DraculaRule) else lightColorScheme(background = AlucardBackground, surface = AlucardBackground, surfaceVariant = Color(0xFFEDEDE7), primary = AlucardLink, onBackground = AlucardInk, onSurface = AlucardInk, outline = AlucardRule)
+    val scheme = if (dark) darkColorScheme(background = DraculaBackground, surface = DraculaBackground, surfaceVariant = Color(0xFF44475A), primary = DraculaLink, secondary = Green, onBackground = DraculaInk, onSurface = DraculaInk, outline = DraculaRule) else lightColorScheme(background = AlucardBackground, surface = AlucardBackground, surfaceVariant = Color(0xFFEDEDE7), primary = AlucardLink, secondary = Color(0xFF006B3C), onBackground = AlucardInk, onSurface = AlucardInk, outline = AlucardRule)
     MaterialTheme(colorScheme = scheme, typography = Typography().run { copy(headlineMedium = headlineMedium.copy(fontFamily = FontFamily.Monospace), titleLarge = titleLarge.copy(fontFamily = FontFamily.Monospace), titleMedium = titleMedium.copy(fontFamily = FontFamily.Monospace), bodyLarge = bodyLarge.copy(fontFamily = FontFamily.Monospace), bodyMedium = bodyMedium.copy(fontFamily = FontFamily.Monospace), labelLarge = labelLarge.copy(fontFamily = FontFamily.Monospace)) }, shapes = Shapes(extraSmall = SquareShape, small = SquareShape, medium = SquareShape, large = SquareShape, extraLarge = SquareShape), content = content)
 }
 
@@ -60,7 +62,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable private fun AudibleApp(dark: Boolean, onDarkChanged: (Boolean) -> Unit, vm: AppViewModel = viewModel()) {
-    val context = LocalContext.current; var tab by rememberSaveable { mutableIntStateOf(0) }; var selected by remember { mutableStateOf<ReleaseEntity?>(null) }
+    val context = LocalContext.current; var tab by rememberSaveable { mutableIntStateOf(0) }; var selected by remember { mutableStateOf<ReleaseEntity?>(null) }; val upcomingScrollState = rememberLazyListState()
     val follows by vm.follows.collectAsState(); val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     val prefs = remember { context.getSharedPreferences("audible-releases", Context.MODE_PRIVATE) }; var onboarding by remember { mutableStateOf(!prefs.getBoolean("onboarding_done", false)) }
     LaunchedEffect(Unit) { vm.refresh(); if (android.os.Build.VERSION.SDK_INT >= 33) permission.launch(Manifest.permission.POST_NOTIFICATIONS) }
@@ -70,7 +72,7 @@ class MainActivity : ComponentActivity() {
     Scaffold(bottomBar = { NavigationBar(containerColor = MaterialTheme.colorScheme.surface) { navLabels.forEachIndexed { i, label -> NavigationBarItem(selected = tab == i, onClick = { tab = i }, icon = { Text(if (tab == i) "> $label" else "  $label", style = MaterialTheme.typography.labelSmall) }, label = null) } } }) { pad ->
         Column(Modifier.padding(pad).fillMaxSize().padding(horizontal = 16.dp)) {
             Spacer(Modifier.height(16.dp)); Text("audible-releases", style = MaterialTheme.typography.headlineMedium); Text("US / UPCOMING AUDIOBOOKS", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary); SyncLine(vm); Spacer(Modifier.height(10.dp))
-            when (tab) { 0 -> UpcomingScreen(vm, { selected = it }); 1 -> FollowingScreen(vm); else -> SettingsScreen(vm, dark, onDarkChanged) }
+            when (tab) { 0 -> UpcomingScreen(vm, { selected = it }, upcomingScrollState); 1 -> FollowingScreen(vm); else -> SettingsScreen(vm, dark, onDarkChanged) }
         }
     }
 }
@@ -79,12 +81,13 @@ class MainActivity : ComponentActivity() {
 
 @Composable private fun SyncLine(vm: AppViewModel) { val loading by vm.loading.collectAsState(); val error by vm.lastError.collectAsState(); val stamp by vm.lastRefreshAt.collectAsState(); val status = when { loading -> "○ SYNCING"; error != null -> "× OFFLINE"; else -> "● LIVE" }; val detail = stamp?.let { " · DATA LOADED ${java.time.format.DateTimeFormatter.ofPattern("HH:mm").format(java.time.Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault()))}" } ?: " · SOURCE AUDIBLE US"; Text(status + detail, style = MaterialTheme.typography.labelLarge, color = if (error != null) Amber else Green) }
 
-@Composable private fun UpcomingScreen(vm: AppViewModel, onOpen: (ReleaseEntity) -> Unit) {
-    val items by vm.upcoming.collectAsState(); var filter by rememberSaveable { mutableStateOf("ALL") }; val today = LocalDate.now(); val filtered = items.filter { filterDate(it, filter, today) }.sortedBy { parseDate(it.releaseDate) ?: LocalDate.MAX }
-    Header(vm, "UPCOMING"); FilterRow(filter) { filter = it }; Spacer(Modifier.height(4.dp)); if (filtered.isEmpty()) EmptyState("No matching releases. Add an author or series in FOLLOWING.") else GroupedReleaseList(filtered, onOpen)
+@Composable private fun UpcomingScreen(vm: AppViewModel, onOpen: (ReleaseEntity) -> Unit, scrollState: LazyListState) {
+    val items by vm.upcoming.collectAsState(); var filter by rememberSaveable { mutableStateOf("ALL") }; val today = LocalDate.now(); val filtered = items.filter { filterDate(it, filter, today) }.sortedWith(compareBy<ReleaseEntity> { releaseBucket(it, today) }.thenBy { parseDate(it.releaseDate) ?: LocalDate.MAX })
+    Header(vm, "UPCOMING"); FilterRow(filter) { filter = it }; Spacer(Modifier.height(4.dp)); if (filtered.isEmpty()) EmptyState("No matching releases. Add an author or series in FOLLOWING.") else GroupedReleaseList(filtered, onOpen, scrollState)
 }
 
 private fun filterDate(item: ReleaseEntity, filter: String, today: LocalDate): Boolean { val date = parseDate(item.releaseDate) ?: return filter == "ALL"; return when (filter) { "7 DAYS" -> !date.isBefore(today) && !date.isAfter(today.plusDays(7)); "MONTH" -> date.month == today.month && date.year == today.year; "RELEASED" -> !date.isAfter(today); else -> true } }
+private fun releaseBucket(item: ReleaseEntity, today: LocalDate): Int { val date = parseDate(item.releaseDate) ?: return 0; return if (date.isBefore(today)) 2 else 1 }
 
 @Composable private fun FilterRow(selected: String, onSelect: (String) -> Unit) { Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { listOf("ALL", "7 DAYS", "MONTH", "RELEASED").forEach { FilterChip(selected == it, { onSelect(it) }, label = { Text(it) }) } } }
 
@@ -116,9 +119,9 @@ private fun filterDate(item: ReleaseEntity, filter: String, today: LocalDate): B
 @Composable private fun Header(vm: AppViewModel, title: String) { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(title, style = MaterialTheme.typography.titleLarge); IconButton({ vm.refresh() }) { Icon(Icons.Default.Refresh, "Refresh") } } }
 @Composable private fun EmptyState(message: String) { Text(message, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(vertical = 20.dp)) }
 
-@Composable private fun GroupedReleaseList(items: List<ReleaseEntity>, onOpen: (ReleaseEntity) -> Unit) { LazyColumn(Modifier.fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(6.dp), contentPadding = PaddingValues(bottom = 24.dp)) { var last: LocalDate? = null; items(items, key = { it.asin }) { item -> val d = parseDate(item.releaseDate); if (d != last) { Text((d?.format(DateTimeFormatter.ofPattern("EEEE, MMMM d")).orEmpty()).uppercase(), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary); Text("────────────────────────────────", color = MaterialTheme.colorScheme.outline); last = d }; ReleaseCard(item, onOpen) } } }
+@Composable private fun GroupedReleaseList(items: List<ReleaseEntity>, onOpen: (ReleaseEntity) -> Unit, scrollState: LazyListState) { LazyColumn(state = scrollState, modifier = Modifier.fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(6.dp), contentPadding = PaddingValues(bottom = 24.dp)) { var last: LocalDate? = null; items(items, key = { it.asin }) { item -> val d = parseDate(item.releaseDate); if (d != last) { Text((d?.format(DateTimeFormatter.ofPattern("EEEE, MMMM d")).orEmpty()).uppercase(), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary); Text("────────────────────────────────", color = MaterialTheme.colorScheme.outline); last = d }; ReleaseCard(item, onOpen) } } }
 
-@Composable private fun ReleaseCard(item: ReleaseEntity, onOpen: (ReleaseEntity) -> Unit) { val date = parseDate(item.releaseDate); val days = date?.let { ChronoUnit.DAYS.between(LocalDate.now(), it) }; val status = when { days == null -> "DATE TBD"; days < 0 -> "RELEASED ${-days}D AGO"; days == 0L -> "RELEASED TODAY"; else -> "IN ${days}D" }; Card(Modifier.fillMaxWidth(), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) { Column(Modifier.padding(10.dp)) { Text("+------------------------------+", color = MaterialTheme.colorScheme.outline); Text(status, style = MaterialTheme.typography.labelLarge, color = if (days != null && days <= 0) Green else Amber); Text(item.title, style = MaterialTheme.typography.titleMedium); if (item.series.isNotBlank()) Text("Series: ${item.series}", color = MaterialTheme.colorScheme.primary); Text("Author: ${item.author}"); Text("Narrator: ${item.narrator.ifBlank { "Not listed" }}"); Text("Release date: ${item.releaseDate}", color = MaterialTheme.colorScheme.primary); Spacer(Modifier.height(2.dp)); TextButton(contentPadding = PaddingValues(0.dp), onClick = { onOpen(item) }) { Text("SHOW MORE  >") } } } }
+@Composable private fun ReleaseCard(item: ReleaseEntity, onOpen: (ReleaseEntity) -> Unit) { val date = parseDate(item.releaseDate); val days = date?.let { ChronoUnit.DAYS.between(LocalDate.now(), it) }; val status = when { days == null -> "DATE TBD"; days < 0 -> "RELEASED ${-days}D AGO"; days == 0L -> "RELEASED TODAY"; else -> "IN ${days}D" }; Card(Modifier.fillMaxWidth(), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) { Column(Modifier.padding(10.dp)) { Text("+------------------------------+", color = MaterialTheme.colorScheme.outline); Text(status, style = MaterialTheme.typography.labelLarge, color = if (days != null && days <= 0) MaterialTheme.colorScheme.secondary else Amber); Text(item.title, style = MaterialTheme.typography.titleMedium); if (item.series.isNotBlank()) Text("Series: ${item.series}", color = MaterialTheme.colorScheme.primary); Text("Author: ${item.author}"); Text("Narrator: ${item.narrator.ifBlank { "Not listed" }}"); Text("Release date: ${item.releaseDate}", color = MaterialTheme.colorScheme.primary); Spacer(Modifier.height(2.dp)); TextButton(contentPadding = PaddingValues(0.dp), onClick = { onOpen(item) }) { Text("SHOW MORE  >") } } } }
 
 @Composable private fun ReleaseDetail(item: ReleaseEntity, back: () -> Unit, context: Context) {
     var showCalendar by remember { mutableStateOf(false) }
@@ -136,7 +139,7 @@ private fun filterDate(item: ReleaseEntity, filter: String, today: LocalDate): B
             Text(item.synopsis.ifBlank { "Synopsis not yet available from the Audible catalog listing. Open Audible for the full description." }, style = MaterialTheme.typography.bodyLarge)
             Spacer(Modifier.height(18.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button({ context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(item.url))) }, shape = SquareShape) { Text("OPEN AUDIBLE") }
+                Button({ context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://www.audible.com/pd/${item.asin}"))) }, shape = SquareShape) { Text("OPEN AUDIBLE") }
                 OutlinedButton({ showCalendar = true }, shape = SquareShape) { Text("ADD TO CALENDAR") }
             }
             if (showCalendar) AlertDialog(onDismissRequest = { showCalendar = false }, title = { Text("ADD TO CALENDAR") }, text = { Text("${item.title}\n${item.releaseDate}\n\nThis opens your calendar app with an all-day release event.") }, confirmButton = { TextButton({ showCalendar = false; addToCalendar(context, item) }) { Text("ADD EVENT") } }, dismissButton = { TextButton({ showCalendar = false }) { Text("CANCEL") } })

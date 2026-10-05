@@ -12,6 +12,8 @@ A Kotlin + Jetpack Compose app for tracking upcoming Audible US releases from se
 - The bottom navigation is text-only (`[UPCOMING]`, `[FOLLOWING]`, `[SETTINGS]`) rather than icon-based; the low-value Search tab was removed.
 - Release metadata now includes a cached synopsis; existing Room databases migrate from version 1 to version 2 automatically.
 - Upcoming cards are compact and show the core release metadata plus **SHOW MORE**. The date navigator was removed to reduce empty space.
+- Upcoming ordering places future releases first, followed by already released titles. The feed keeps its scroll position when opening and backing out of a release detail.
+- Alucard uses a dark green released-status color for readable contrast on the light paper background; Dracula keeps its bright green status color.
 - Settings supports plain-text export/import of followed authors and series. Audible product URLs are normalized to the corresponding `/pd/` book link, and follow matching normalizes punctuation and ampersands.
 - Local Room database for follows and cached release metadata.
 - Daily WorkManager refresh and Android notification permission/channel.
@@ -46,7 +48,7 @@ The Gradle wrapper/configuration check passes in the sandbox. The sandbox does n
 
 ## Important implementation note
 
-`AudibleRepository.kt` uses Audible’s undocumented catalog endpoint with public metadata response groups. The endpoint may change or become unavailable; the app does not access account cookies or private endpoints. Android back gestures are handled by Compose `BackHandler` so SHOW MORE returns to the feed instead of closing the app.
+`AudibleRepository.kt` uses Audible’s undocumented catalog endpoint with public metadata response groups. The endpoint may change or become unavailable; the app does not access account cookies or private endpoints. The app opens books at the canonical `https://www.audible.com/pd/{ASIN}` URL rather than the redirecting bare `audible.com` host. Android back gestures are handled by Compose `BackHandler` so SHOW MORE returns to the feed instead of closing the app.
 
 ## Calendar action
 

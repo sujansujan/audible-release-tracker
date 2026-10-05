@@ -19,7 +19,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val upcoming = combine(releases, follows) { items, saved ->
         val authors = saved.filter { it.kind == "author" }.map { normalize(it.value) }
         val series = saved.filter { it.kind == "series" }.map { normalize(it.value) }
-        if (authors.isEmpty() && series.isEmpty()) items else items.filter { item -> authors.any { matches(it, normalize(item.author)) } || series.any { matches(it, normalize(item.series)) } }
+        val filtered = if (authors.isEmpty() && series.isEmpty()) items else items.filter { item -> authors.any { matches(it, normalize(item.author)) } || series.any { matches(it, normalize(item.series)) } }
+        filtered
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val searchResults = combine(releases, query) { items, q -> if (q.isBlank()) items else items.filter { val s = q.lowercase(); listOf(it.title, it.author, it.series, it.narrator).any { f -> f.lowercase().contains(s) } } }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())

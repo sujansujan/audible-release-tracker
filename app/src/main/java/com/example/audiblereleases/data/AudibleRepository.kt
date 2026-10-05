@@ -89,7 +89,7 @@ class AudibleRepository {
             series = series,
             length = runtime,
             releaseDate = date,
-            url = "https://audible.com/pd/$asin?overrideBaseCountry=true&ipRedirectOverride=true",
+            url = "https://www.audible.com/pd/$asin",
             synopsis = synopsis
         )
     }
