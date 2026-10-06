@@ -23,6 +23,7 @@ A Kotlin + Jetpack Compose app for tracking upcoming Audible US releases from se
 - All displayed text is selectable. The top header and bottom text navigation collapse during feed scrolling; the Following and Settings tabs use command-style text controls and plain-text import/export.
 - The feed now uses a stable fixed layout: animated chrome hiding was removed because it caused scroll stutter. The default bottom tab is **SORT**, showing upcoming releases only; released titles can still be viewed through the explicit filters.
 - The non-working **OPEN AUDIBLE** action was removed from cards and detail screens. Calendar export remains available.
+- High-refresh scrolling is optimized with a fixed, non-animated layout, stable ASIN keys, explicit lazy content types, a full-size lazy viewport, and selection containers scoped to cards/screens instead of wrapping the entire feed gesture surface.
 
 ## Visual direction
 
