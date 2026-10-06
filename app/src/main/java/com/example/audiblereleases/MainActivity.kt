@@ -78,6 +78,7 @@ class MainActivity : ComponentActivity() {
                 when (tab) { 0 -> UpcomingScreen(vm, follows, { selected = it }, upcomingScrollState, context); 1 -> SelectionContainer { FollowingScreen(vm) }; else -> SelectionContainer { SettingsScreen(vm, dark, onDarkChanged) } }
             }
     }
+}
 
 @Composable private fun TextNavigation(labels: List<String>, selected: Int, onSelect: (Int) -> Unit) { Column(Modifier.fillMaxWidth()) { Text("────────────────────────────────────────────────", color = MaterialTheme.colorScheme.outline); Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) { labels.forEachIndexed { index, label -> TextButton(onClick = { onSelect(index) }, contentPadding = PaddingValues(horizontal = 2.dp, vertical = 0.dp)) { Text(if (selected == index) "> $label" else "  $label", style = MaterialTheme.typography.labelSmall, color = if (selected == index) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface) } } } } }
 
