@@ -118,4 +118,17 @@ private fun normalizeUi(value: String) = value.lowercase().replace("&", "and").r
 @Composable private fun ReleaseDetail(item: ReleaseEntity, back: () -> Unit, context: Context) { var showCalendar by remember { mutableStateOf(false) }; Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) { Column(Modifier.fillMaxSize().padding(16.dp)) { TextButton(back, contentPadding = PaddingValues(0.dp)) { Text("< BACK TO RELEASES") }; Text(item.title, style = MaterialTheme.typography.headlineMedium); Text("────────────────────────────────", color = MaterialTheme.colorScheme.outline); Spacer(Modifier.height(8.dp)); if (item.series.isNotBlank()) Text("Series: ${item.series}", color = MaterialTheme.colorScheme.primary); Spacer(Modifier.height(10.dp)); Text("Author: ${item.author}\nNarrator: ${item.narrator.ifBlank { "Not listed" }}\nRelease date: ${item.releaseDate}\nASIN: ${item.asin}", style = MaterialTheme.typography.bodyLarge); Spacer(Modifier.height(14.dp)); Text("SYNOPSIS", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary); Text(item.synopsis.ifBlank { "Synopsis not yet available from the Audible catalog listing." }, style = MaterialTheme.typography.bodyLarge); Spacer(Modifier.height(14.dp)); TextButton({ showCalendar = true }, contentPadding = PaddingValues(0.dp)) { Text("> ADD TO CALENDAR") }; if (showCalendar) AlertDialog(onDismissRequest = { showCalendar = false }, title = { Text("ADD TO CALENDAR") }, text = { Text("${item.title}\n${item.releaseDate}\n\nSave an all-day release event?") }, confirmButton = { TextButton({ showCalendar = false; addToCalendar(context, item) }) { Text("ADD EVENT") } }, dismissButton = { TextButton({ showCalendar = false }) { Text("CANCEL") } }) } } }
 
 private fun parseDate(raw: String): LocalDate? = try { LocalDate.parse(raw, DateTimeFormatter.ofPattern("MM-dd-yy")) } catch (_: DateTimeParseException) { null }
-private fun addToCalendar(context: Context, item: ReleaseEntity) { val date = parseDate(item.releaseDate) ?: return; val start = date.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli(); context.startActivity(Intent(Intent.ACTION_INSERT).setData(CalendarContract.Events.CONTENT_URI).putExtra(CalendarContract.Events.TITLE, "${item.title} — Audible release").putExtra(CalendarContract.Events.DESCRIPTION, "${item.author}\nhttps://www.audible.com/pd/${item.asin}").putExtra(CalendarContract.Events.ALL_DAY, true).putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, start).putExtra(CalendarContract.EXTRA_EVENT_END_TIME, start + 86_400_000L)) }
+private fun addToCalendar(context: Context, item: ReleaseEntity) {
+    val date = parseDate(item.releaseDate) ?: return
+    val start = date.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+    val end = date.plusDays(1).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+    val intent = Intent(Intent.ACTION_INSERT).apply {
+        data = CalendarContract.Events.CONTENT_URI
+        putExtra(CalendarContract.Events.TITLE, "${item.title} — Audible release")
+        putExtra(CalendarContract.Events.DESCRIPTION, "${item.author}\nhttps://www.audible.com/pd/${item.asin}")
+        putExtra(CalendarContract.Events.ALL_DAY, true)
+        putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, start)
+        putExtra(CalendarContract.EXTRA_EVENT_END_TIME, end)
+    }
+    context.startActivity(intent)
+}
