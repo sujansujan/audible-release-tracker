@@ -59,7 +59,7 @@ private val SquareShape = RoundedCornerShape(0.dp)
 }
 
 class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState); scheduleSync(); setContent { val dark = remember { mutableStateOf(getPreferences(0).getBoolean("dark_mode", false)) }; PlainTextTheme(dark.value) { AudibleApp(dark.value) { value -> dark.value = value; getPreferences(0).edit().putBoolean("dark_mode", value).apply() } } } }
+    override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState); scheduleSync(); setContent { val dark = remember { mutableStateOf(getPreferences(0).getBoolean("dark_mode", false)) }; PlainTextTheme(dark.value) { AudibleApp(dark.value, onDarkChanged = { value -> dark.value = value; getPreferences(0).edit().putBoolean("dark_mode", value).apply() }) } } }
     private fun scheduleSync() { WorkManager.getInstance(this).enqueueUniquePeriodicWork("audible-release-sync", ExistingPeriodicWorkPolicy.KEEP, PeriodicWorkRequestBuilder<com.example.audiblereleases.worker.ReleaseSyncWorker>(1, TimeUnit.DAYS).build()) }
 }
 
