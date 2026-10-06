@@ -16,8 +16,8 @@ class ReleaseSyncWorker(appContext: Context, params: WorkerParameters) : Corouti
         val db = AppDatabase.get(applicationContext); val repository = AudibleRepository(); val items = (repository.fetchComingSoon() + repository.fetchNewReleases()).distinctBy { it.asin }; val oldAsins = db.releases().observeAll().first().map { it.asin }.toSet(); db.releases().upsertAll(items)
         val follows = db.follows().observeAll().first()
         val authors = follows.filter { it.kind == "author" }.map { it.value.lowercase() }; val series = follows.filter { it.kind == "series" }.map { it.value.lowercase() }
-        val today = LocalDate.now(); val formatter = DateTimeFormatter.ofPattern("MM-dd-yy")
-        val matches = items.filter { item -> !oldAsins.contains(item.asin) && (authors.any { a -> item.author.lowercase().contains(a) } || series.any { s -> item.series.lowercase().contains(s) }) && runCatching { !LocalDate.parse(item.releaseDate, formatter).isAfter(today) }.getOrDefault(false) }
+        val today = LocalDate.now(); val formatter = DateTimeFormatter.ofPattern("MM-dd-yy"); val notificationPrefs = applicationContext.getSharedPreferences("audible-releases", Context.MODE_PRIVATE); val notifyDayBefore = notificationPrefs.getBoolean("notify_day_before", false); val notifyWeekBefore = notificationPrefs.getBoolean("notify_week_before", false)
+        val matches = items.filter { item -> !oldAsins.contains(item.asin) && (authors.any { a -> item.author.lowercase().contains(a) } || series.any { s -> item.series.lowercase().contains(s) }) && runCatching { val release = LocalDate.parse(item.releaseDate, formatter); !release.isAfter(today) || (notifyDayBefore && release == today.plusDays(1)) || (notifyWeekBefore && !release.isBefore(today.plusDays(1)) && !release.isAfter(today.plusDays(7))) }.getOrDefault(false) }
         if (matches.isNotEmpty()) notify(matches.size, matches.first().title)
         Result.success()
     }.getOrElse { Result.retry() }

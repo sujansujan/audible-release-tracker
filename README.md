@@ -19,6 +19,8 @@ A Kotlin + Jetpack Compose app for tracking upcoming Audible US releases from se
 - Daily WorkManager refresh and Android notification permission/channel.
 - Audible public Coming Soon and New Releases catalog fetchers in one isolated repository class; the worker merges them so a title leaving Coming Soon on release day can still trigger an alert.
 - Audible catalog API integration modeled after the public MediaTracker approach: ASIN-based products, contributor/series metadata, merchandising synopsis, and canonical `audible.com/pd/{ASIN}` links.
+- The feed uses explicit **NEXT 7 DAYS**, **LATER**, and **RELEASED** sections, aligned metadata rows, text status badges, match reasons, compact `[DETAILS]` / `[CALENDAR]` / `[AUDIBLE]` actions, and a sync/count summary.
+- All displayed text is selectable. The top header and bottom text navigation collapse during feed scrolling; the Following and Settings tabs use command-style text controls and plain-text import/export.
 
 ## Visual direction
 
