@@ -31,13 +31,9 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 private object ThumbnailCache {
-    val memory = object : LruCache<String, ImageBitmap>(60) {}
+    val memory = object : LruCache<String, ImageBitmap>(80) {}
 }
 
-/**
- * Lean, zero-dependency book cover thumbnail loader with memory + disk caching
- * and a 1dp Dracula/Alucard border frame.
- */
 @Composable
 fun CoverThumbnail(
     coverUrl: String,
@@ -85,7 +81,7 @@ fun CoverThumbnail(
                     }
                 }
             } catch (_: Exception) {
-                // Keep ASCII placeholder on error
+                // Keep ASCII fallback on error
             }
         }
     }

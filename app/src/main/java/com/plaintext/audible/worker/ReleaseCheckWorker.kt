@@ -24,7 +24,7 @@ class ReleaseCheckWorker(
 
     override suspend fun doWork(): Result {
         val repo = ReleaseRepository(applicationContext)
-        val releases = repo.syncCatalog()
+        val releases = repo.syncCatalog(forceRefresh = true)
         val domain = repo.getPrefs().marketplace.domain
         val today = LocalDate.now()
 

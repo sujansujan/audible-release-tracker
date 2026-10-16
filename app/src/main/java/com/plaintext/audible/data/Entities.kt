@@ -1,6 +1,7 @@
 package com.plaintext.audible.data
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
 enum class TrackType {
@@ -11,7 +12,10 @@ enum class DndTargetType {
     BOOK, SERIES
 }
 
-@Entity(tableName = "tracked_items")
+@Entity(
+    tableName = "tracked_items",
+    indices = [Index(value = ["type", "queryValue"])]
+)
 data class TrackedItemEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val type: TrackType,
@@ -52,5 +56,5 @@ data class ReleaseEntity(
     val synopsis: String = "",       // Plain-text summary from product_desc
     val runtimeMinutes: Int = 0,     // Runtime length in minutes
     val publisher: String = "",      // Publisher name
-    val altAsins: String = ""        // Comma-separated all edition ASINs (US + International)
+    val altAsins: String = ""        // Comma-separated all edition ASINs
 )

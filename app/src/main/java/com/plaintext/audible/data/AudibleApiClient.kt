@@ -1,9 +1,11 @@
 package com.plaintext.audible.data
 
+import android.util.LruCache
 import androidx.core.text.HtmlCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -31,16 +33,27 @@ object AudibleApiClient {
     private const val RESPONSE_GROUPS =
         "contributors,product_attrs,product_desc,product_extended_attrs,series,relationships,media"
     private const val IMAGE_SIZES = "252,500"
+    private const val DISK_CACHE_TTL_MS = 12L * 60L * 60L * 1000L // 12 hours
+
+    // In-memory parsed product list cache for instant UI/search response
+    private val memoryCache = object : LruCache<String, List<CatalogProduct>>(120) {}
+    @Volatile
+    private var diskCacheDir: File? = null
+
+    fun initCache(baseCacheDir: File) {
+        diskCacheDir = File(baseCacheDir, "audible_catalog_json").apply { mkdirs() }
+    }
 
     suspend fun searchCatalog(
         author: String? = null,
         narrator: String? = null,
         titleOrSeries: String? = null,
         asin: String? = null,
-        numResults: Int = 40
+        numResults: Int = 40,
+        forceRefresh: Boolean = false
     ): List<CatalogProduct> = withContext(Dispatchers.IO) {
         if (!asin.isNullOrBlank() && asin.trim().matches(Regex("^[A-Z0-9]{10}$", RegexOption.IGNORE_CASE))) {
-            return@withContext fetchByAsin(asin.trim().uppercase())
+            return@withContext fetchByAsin(asin.trim().uppercase(), forceRefresh)
         }
 
         val params = mutableListOf(
@@ -59,26 +72,62 @@ object AudibleApiClient {
             params += "keywords=${URLEncoder.encode(it.trim(), "UTF-8")}"
         }
 
-        val url = URL("$BASE_URL?${params.joinToString("&")}")
-        val jsonStr = executeGet(url) ?: return@withContext emptyList()
-        parseProductsArray(JSONObject(jsonStr))
+        val urlStr = "$BASE_URL?${params.joinToString("&")}"
+        if (!forceRefresh) {
+            memoryCache.get(urlStr)?.let { return@withContext it }
+        }
+
+        val jsonStr = fetchWithDiskCache(urlStr, forceRefresh) ?: return@withContext emptyList()
+        val parsed = parseProductsArray(JSONObject(jsonStr))
+        if (parsed.isNotEmpty()) {
+            memoryCache.put(urlStr, parsed)
+        }
+        parsed
     }
 
-    private fun fetchByAsin(asin: String): List<CatalogProduct> {
-        val url = URL("$BASE_URL/$asin?response_groups=$RESPONSE_GROUPS&image_sizes=$IMAGE_SIZES")
-        val jsonStr = executeGet(url) ?: return emptyList()
+    private fun fetchByAsin(asin: String, forceRefresh: Boolean): List<CatalogProduct> {
+        val urlStr = "$BASE_URL/$asin?response_groups=$RESPONSE_GROUPS&image_sizes=$IMAGE_SIZES"
+        if (!forceRefresh) {
+            memoryCache.get(urlStr)?.let { return it }
+        }
+        val jsonStr = fetchWithDiskCache(urlStr, forceRefresh) ?: return emptyList()
         val root = JSONObject(jsonStr)
         val prodObj = root.optJSONObject("product") ?: return emptyList()
-        return listOfNotNull(parseProductObject(prodObj))
+        val parsed = listOfNotNull(parseProductObject(prodObj))
+        if (parsed.isNotEmpty()) {
+            memoryCache.put(urlStr, parsed)
+        }
+        return parsed
+    }
+
+    private fun fetchWithDiskCache(urlStr: String, forceRefresh: Boolean): String? {
+        val dir = diskCacheDir
+        val cacheFile = dir?.let { File(it, urlStr.hashCode().toUInt().toString(16) + ".json") }
+
+        if (!forceRefresh && cacheFile != null && cacheFile.exists()) {
+            val ageMs = System.currentTimeMillis() - cacheFile.lastModified()
+            if (ageMs in 0..DISK_CACHE_TTL_MS && cacheFile.length() > 0) {
+                runCatching { return cacheFile.readText(Charsets.UTF_8) }
+            }
+        }
+
+        val freshJson = executeGet(URL(urlStr))
+        if (freshJson != null && cacheFile != null) {
+            runCatching { cacheFile.writeText(freshJson, Charsets.UTF_8) }
+        } else if (freshJson == null && cacheFile != null && cacheFile.exists()) {
+            // Offline fallback: use stale disk cache if network fails
+            runCatching { return cacheFile.readText(Charsets.UTF_8) }
+        }
+        return freshJson
     }
 
     private fun executeGet(url: URL): String? {
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
-            connectTimeout = 12_000
-            readTimeout = 12_000
+            connectTimeout = 10_000
+            readTimeout = 10_000
             setRequestProperty("Accept", "application/json")
-            setRequestProperty("User-Agent", "PlainTextAudibleTracker/1.1 (Android)")
+            setRequestProperty("User-Agent", "PlainTextAudibleTracker/1.4 (Android)")
         }
         return try {
             if (conn.responseCode in 200..299) {
@@ -140,13 +189,11 @@ object AudibleApiClient {
         val language = obj.optString("language", "english")
         val formatType = obj.optString("format_type", "unabridged")
 
-        // Extract square cover thumbnail URL from product_images
         var coverUrl = ""
         obj.optJSONObject("product_images")?.let { imgObj ->
             coverUrl = imgObj.optString("252").ifBlank { imgObj.optString("500") }
         }
 
-        // Extract and strip HTML from synopsis (Feature #1)
         val rawHtmlSummary = obj.optString("publisher_summary")
             .ifBlank { obj.optString("merchandising_summary", "") }
         val cleanSynopsis = if (rawHtmlSummary.isNotBlank()) {

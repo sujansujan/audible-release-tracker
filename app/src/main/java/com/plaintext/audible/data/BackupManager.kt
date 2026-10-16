@@ -8,7 +8,7 @@ object BackupManager {
         val root = JSONObject()
         val prefs = repo.getPrefs()
 
-        root.put("version", 2)
+        root.put("version", 3)
         root.put("prefs", JSONObject().apply {
             put("englishOnly", prefs.englishOnly)
             put("hideAbridged", prefs.hideAbridged)
@@ -62,13 +62,10 @@ object BackupManager {
         root.optJSONArray("trackedItems")?.let { arr ->
             for (i in 0 until arr.length()) {
                 val o = arr.optJSONObject(i) ?: continue
-                repo.dao.insertTrackedItem(
-                    TrackedItemEntity(
-                        type = TrackType.valueOf(o.getString("type")),
-                        queryValue = o.getString("queryValue"),
-                        externalId = o.optString("externalId").takeIf { it.isNotBlank() },
-                        lastReadSequence = o.optInt("lastReadSequence", 0)
-                    )
+                repo.addTrackedItemUnique(
+                    type = TrackType.valueOf(o.getString("type")),
+                    rawQuery = o.getString("queryValue"),
+                    lastReadSequence = o.optInt("lastReadSequence", 0)
                 )
             }
         }

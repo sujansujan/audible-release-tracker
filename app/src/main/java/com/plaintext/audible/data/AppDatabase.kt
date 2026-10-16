@@ -14,6 +14,11 @@ interface TrackerDao {
     @Query("SELECT * FROM tracked_items")
     suspend fun getAllTrackedItems(): List<TrackedItemEntity>
 
+    @Query(
+        "SELECT * FROM tracked_items WHERE type = :type AND LOWER(TRIM(queryValue)) = LOWER(TRIM(:queryValue)) LIMIT 1"
+    )
+    suspend fun findTrackedItem(type: TrackType, queryValue: String): TrackedItemEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertTrackedItem(item: TrackedItemEntity): Long
 
@@ -44,6 +49,9 @@ interface TrackerDao {
     @Query("DELETE FROM releases")
     suspend fun clearAllReleases()
 
+    @Query("DELETE FROM releases WHERE asin NOT IN (:validAsins)")
+    suspend fun deleteReleasesNotIn(validAsins: List<String>)
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertReleases(releases: List<ReleaseEntity>)
 
@@ -62,7 +70,7 @@ interface TrackerDao {
 
 @Database(
     entities = [TrackedItemEntity::class, DndRuleEntity::class, ReleaseEntity::class],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -82,6 +90,20 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Remove any duplicate tracked items (keep earliest row per type + case-insensitive queryValue)
+                db.execSQL(
+                    "DELETE FROM tracked_items WHERE id NOT IN (" +
+                        "SELECT MIN(id) FROM tracked_items GROUP BY type, LOWER(TRIM(queryValue))" +
+                        ")"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_tracked_items_type_queryValue ON tracked_items(type, queryValue)"
+                )
+            }
+        }
+
         fun get(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 Room.databaseBuilder(
@@ -89,7 +111,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "plaintext_audible.db"
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .fallbackToDestructiveMigration()
                     .build()
                     .also { INSTANCE = it }

@@ -12,8 +12,8 @@ android {
         applicationId = "com.plaintext.audible"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 4
+        versionName = "1.4.0"
     }
 
     buildTypes {
@@ -53,12 +53,10 @@ dependencies {
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
 
-    // Room for local persistence (tracked items, cached releases, DND rules, series progress)
     val roomVersion = "2.6.1"
     implementation("androidx.room:room-runtime:$roomVersion")
     implementation("androidx.room:room-ktx:$roomVersion")
     ksp("androidx.room:room-compiler:$roomVersion")
 
-    // WorkManager for daily T-7d and T-0d release checks
     implementation("androidx.work:work-runtime-ktx:2.9.0")
 }

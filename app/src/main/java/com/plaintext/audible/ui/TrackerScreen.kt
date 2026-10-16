@@ -15,6 +15,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
@@ -28,6 +30,7 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.plaintext.audible.data.*
@@ -71,7 +74,11 @@ fun TrackerScreen(
     var isSyncing by remember { mutableStateOf(false) }
     var showTbaExpanded by remember { mutableStateOf(false) }
 
-    // Auto-hide bottom bar when scrolling down, show when scrolling up
+    // Background warm-sync using disk/memory cache on startup
+    LaunchedEffect(Unit) {
+        repo.syncCatalog(forceRefresh = false)
+    }
+
     var isBottomBarVisible by remember { mutableStateOf(true) }
     val nestedScrollConnection = remember {
         object : NestedScrollConnection {
@@ -89,6 +96,22 @@ fun TrackerScreen(
     val seriesReadMap = remember(trackedItems) {
         trackedItems.filter { it.type == TrackType.SERIES }
             .associateBy({ it.queryValue.lowercase() }, { it })
+    }
+
+    // Helper for adding a tracked item with duplicate protection & toast feedback
+    val handleAddTracked: (TrackType, String, Int) -> Unit = { type, query, lastRead ->
+        scope.launch {
+            val cleaned = query.trim()
+            val added = repo.addTrackedItemUnique(type, cleaned, lastRead)
+            if (added) {
+                Toast.makeText(context, "[ + Tracked ${type.name}: $cleaned ]", Toast.LENGTH_SHORT).show()
+                isSyncing = true
+                repo.syncCatalog(forceRefresh = false)
+                isSyncing = false
+            } else {
+                Toast.makeText(context, "[ Already Tracked: $cleaned ]", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     CompositionLocalProvider(LocalPtsPalette provides palette) {
@@ -124,7 +147,7 @@ fun TrackerScreen(
                                 if (!isSyncing) {
                                     scope.launch {
                                         isSyncing = true
-                                        repo.syncCatalog()
+                                        repo.syncCatalog(forceRefresh = true)
                                         isSyncing = false
                                     }
                                 }
@@ -145,7 +168,6 @@ fun TrackerScreen(
                 HorizontalDivider(color = palette.surfaceLine, thickness = 1.dp)
                 Spacer(modifier = Modifier.height(6.dp))
 
-                // Main Content Area
                 Box(modifier = Modifier.weight(1f)) {
                     when (activeTab) {
                         ActiveTab.UPCOMING -> UpcomingFeedView(
@@ -155,17 +177,18 @@ fun TrackerScreen(
                             showTbaExpanded = showTbaExpanded,
                             onToggleTba = { showTbaExpanded = !showTbaExpanded },
                             onClearNewBadges = { scope.launch { repo.dao.clearNewDiscoveryFlags() } },
-                            onOpenAudibleDirect = { asin ->
-                                val domain = prefs.marketplace.domain
-                                val url = "https://www.$domain/pd/$asin?ipRedirectOverride=true&overrideBaseCountry=true"
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-                            },
                             onOpenAudibleSearch = { rel ->
                                 val domain = prefs.marketplace.domain
                                 val primaryAuthor = rel.authors.split(",").firstOrNull()?.trim().orEmpty()
                                 val q = URLEncoder.encode("${rel.title} $primaryAuthor".trim(), "UTF-8")
                                 val url = "https://www.$domain/search?keywords=$q&ipRedirectOverride=true&overrideBaseCountry=true"
                                 context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                            },
+                            onOpenAudioBookBay = { rel ->
+                                val primaryAuthor = rel.authors.split(",").firstOrNull()?.trim().orEmpty()
+                                val q = URLEncoder.encode("${rel.title} $primaryAuthor".trim().lowercase(), "UTF-8")
+                                val abbUrl = "https://audiobookbay.lu/?s=$q&cat=undefined%2Cundefined"
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(abbUrl)))
                             },
                             onExportCalendar = { rel ->
                                 val date = runCatching { LocalDate.parse(rel.releaseDateIso) }.getOrNull()
@@ -187,15 +210,7 @@ fun TrackerScreen(
                                     }
                                 }
                             },
-                            onQuickTrack = { type, value ->
-                                scope.launch {
-                                    repo.dao.insertTrackedItem(TrackedItemEntity(type = type, queryValue = value))
-                                    Toast.makeText(context, "[ Tracked $type: $value ]", Toast.LENGTH_SHORT).show()
-                                    isSyncing = true
-                                    repo.syncCatalog()
-                                    isSyncing = false
-                                }
-                            },
+                            onQuickTrack = { type, value -> handleAddTracked(type, value, 0) },
                             onMuteBook = { rel -> scope.launch { repo.muteBook(rel.asin, rel.title) } },
                             onMuteSeries = { rel ->
                                 scope.launch { repo.muteSeries(rel.seriesTitle, rel.seriesTitle) }
@@ -207,32 +222,30 @@ fun TrackerScreen(
 
                         ActiveTab.TRACKED -> TrackedEntitiesView(
                             trackedItems = trackedItems,
-                            onAddTracked = { type, query, lastRead ->
-                                scope.launch {
-                                    repo.dao.insertTrackedItem(
-                                        TrackedItemEntity(
-                                            type = type,
-                                            queryValue = query.trim(),
-                                            lastReadSequence = lastRead
-                                        )
-                                    )
-                                    isSyncing = true
-                                    repo.syncCatalog()
-                                    isSyncing = false
-                                }
-                            },
+                            onAddTracked = handleAddTracked,
                             onDeleteTracked = { item ->
-                                scope.launch { repo.dao.deleteTrackedItem(item) }
+                                scope.launch {
+                                    repo.dao.deleteTrackedItem(item)
+                                    repo.syncCatalog(forceRefresh = false)
+                                }
                             },
                             onUpdateSeriesSeq = { item, newSeq ->
                                 scope.launch { repo.dao.updateSeriesReadSequence(item.id, newSeq) }
+                            },
+                            onOpenAbbQuery = { rawQuery ->
+                                val q = URLEncoder.encode(rawQuery.trim().lowercase(), "UTF-8")
+                                val abbUrl = "https://audiobookbay.lu/?s=$q&cat=undefined%2Cundefined"
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(abbUrl)))
                             }
                         )
 
                         ActiveTab.DND -> DndListView(
                             dndRules = dndRules,
                             onRemoveRule = { rule ->
-                                scope.launch { repo.dao.deleteDndRule(rule) }
+                                scope.launch {
+                                    repo.dao.deleteDndRule(rule)
+                                    repo.syncCatalog(forceRefresh = false)
+                                }
                             }
                         )
 
@@ -246,7 +259,9 @@ fun TrackerScreen(
                                     updated.notifyHour,
                                     updated.notifyMinute
                                 )
+                                scope.launch { repo.syncCatalog(forceRefresh = false) }
                             },
+                            onAddTrackedDirect = handleAddTracked,
                             onExportBackup = onExportBackup,
                             onImportBackup = onImportBackup
                         )
@@ -254,7 +269,7 @@ fun TrackerScreen(
                 }
             }
 
-            // Feature #6: Auto-Hiding Bottom Navigation Bar & Quick Filter Strip
+            // Auto-Hiding Bottom Navigation Bar & Quick Filter Strip
             AnimatedVisibility(
                 visible = isBottomBarVisible,
                 enter = slideInVertically(initialOffsetY = { it }),
@@ -267,7 +282,6 @@ fun TrackerScreen(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(modifier = Modifier.fillMaxWidth()) {
-                        // Quick Filter Strip on UPCOMING tab
                         if (activeTab == ActiveTab.UPCOMING) {
                             Row(
                                 modifier = Modifier
@@ -290,7 +304,6 @@ fun TrackerScreen(
                             HorizontalDivider(color = palette.surfaceLine, thickness = 1.dp)
                         }
 
-                        // Primary Bottom Navigation Tabs (< UPCOMING | TRACKED | DND | CFG >)
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -334,8 +347,8 @@ private fun UpcomingFeedView(
     showTbaExpanded: Boolean,
     onToggleTba: () -> Unit,
     onClearNewBadges: () -> Unit,
-    onOpenAudibleDirect: (String) -> Unit,
     onOpenAudibleSearch: (ReleaseEntity) -> Unit,
+    onOpenAudioBookBay: (ReleaseEntity) -> Unit,
     onExportCalendar: (ReleaseEntity) -> Unit,
     onQuickTrack: (TrackType, String) -> Unit,
     onMuteBook: (ReleaseEntity) -> Unit,
@@ -400,7 +413,7 @@ private fun UpcomingFeedView(
             item {
                 AsciiBox(headerLabel = "SCOREBOARD EMPTY") {
                     MonoText(
-                        text = "No scheduled upcoming releases match [${quickFilter.label}].\nTap [ TRACKED ] on the bottom bar to search or add a Series, Author, Narrator, or Book, then tap [ SYNC ].",
+                        text = "No scheduled upcoming releases match [${quickFilter.label}].\nTap [ TRACKED ] on the bottom bar to search the live catalog (or add directly in [ CFG ]).",
                         color = palette.comment
                     )
                 }
@@ -411,8 +424,8 @@ private fun UpcomingFeedView(
             ReleaseScorecard(
                 rel = rel,
                 trackedSeriesMap = trackedSeriesMap,
-                onOpenAudibleDirect = onOpenAudibleDirect,
                 onOpenAudibleSearch = { onOpenAudibleSearch(rel) },
+                onOpenAudioBookBay = { onOpenAudioBookBay(rel) },
                 onExportCalendar = { onExportCalendar(rel) },
                 onQuickTrack = onQuickTrack,
                 onMuteBook = { onMuteBook(rel) },
@@ -435,8 +448,8 @@ private fun UpcomingFeedView(
                     ReleaseScorecard(
                         rel = rel,
                         trackedSeriesMap = trackedSeriesMap,
-                        onOpenAudibleDirect = onOpenAudibleDirect,
                         onOpenAudibleSearch = { onOpenAudibleSearch(rel) },
+                        onOpenAudioBookBay = { onOpenAudioBookBay(rel) },
                         onExportCalendar = { onExportCalendar(rel) },
                         onQuickTrack = onQuickTrack,
                         onMuteBook = { onMuteBook(rel) },
@@ -453,8 +466,8 @@ private fun UpcomingFeedView(
 private fun ReleaseScorecard(
     rel: ReleaseEntity,
     trackedSeriesMap: Map<String, TrackedItemEntity>,
-    onOpenAudibleDirect: (String) -> Unit,
     onOpenAudibleSearch: () -> Unit,
+    onOpenAudioBookBay: () -> Unit,
     onExportCalendar: () -> Unit,
     onQuickTrack: (TrackType, String) -> Unit,
     onMuteBook: () -> Unit,
@@ -467,14 +480,6 @@ private fun ReleaseScorecard(
         runCatching { ChronoUnit.DAYS.between(today, LocalDate.parse(rel.releaseDateIso)) }.getOrNull()
     }
 
-    // Feature #3: Multi-Edition ASIN cycling (US vs. International ASINs)
-    val allAsins = remember(rel.altAsins, rel.asin) {
-        rel.altAsins.split(",").map { it.trim() }.filter { it.isNotBlank() }.ifEmpty { listOf(rel.asin) }
-    }
-    var selectedAsinIndex by remember(rel.asin) { mutableIntStateOf(0) }
-    val currentAsin = allAsins.getOrElse(selectedAsinIndex % allAsins.size) { rel.asin }
-
-    // Feature #1: Expandable Synopsis & Metadata Drawer
     var showInfoDrawer by remember { mutableStateOf(false) }
 
     val countdownBadge = when {
@@ -511,7 +516,6 @@ private fun ReleaseScorecard(
             Spacer(modifier = Modifier.height(2.dp))
         }
 
-        // Top Row: Framed Book Cover Thumbnail + Metadata Column
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.Top
@@ -539,14 +543,13 @@ private fun ReleaseScorecard(
                 MonoText(text = "Author: ${rel.authors}", color = palette.yellow, fontSizeSp = 12)
                 MonoText(text = "Narrator: ${rel.narrators}", color = palette.orange, fontSizeSp = 12)
                 MonoText(
-                    text = "Match: [${rel.matchedTags.replace(",", "] [")}] • ASIN: $currentAsin",
+                    text = "Match: [${rel.matchedTags.replace(",", "] [")}]",
                     color = palette.comment,
                     fontSizeSp = 11
                 )
             }
         }
 
-        // Feature #5: Series Gap Detector Warning
         if (hasSeriesGap && matchedTrackedSeries != null && seq != null) {
             Spacer(modifier = Modifier.height(6.dp))
             Row(
@@ -568,7 +571,6 @@ private fun ReleaseScorecard(
             }
         }
 
-        // Feature #1: Expandable In-App Plain-Text Synopsis & Metadata Drawer
         if (showInfoDrawer) {
             Spacer(modifier = Modifier.height(6.dp))
             AsciiBox(
@@ -585,13 +587,6 @@ private fun ReleaseScorecard(
                     color = palette.cyan,
                     fontSizeSp = 11
                 )
-                if (allAsins.size > 1) {
-                    MonoText(
-                        text = "Grouped Edition ASINs: ${allAsins.joinToString(", ")}",
-                        color = palette.purple,
-                        fontSizeSp = 11
-                    )
-                }
                 Spacer(modifier = Modifier.height(4.dp))
                 MonoText(
                     text = rel.synopsis.ifBlank { "No publisher summary posted yet for this pre-order." },
@@ -599,7 +594,6 @@ private fun ReleaseScorecard(
                     fontSizeSp = 12
                 )
                 Spacer(modifier = Modifier.height(6.dp))
-                // Feature #4: One-tap track Series or Author directly from the card
                 Row(
                     modifier = Modifier.horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -626,7 +620,7 @@ private fun ReleaseScorecard(
         Spacer(modifier = Modifier.height(6.dp))
         HorizontalDivider(color = palette.surfaceLine, thickness = 1.dp)
 
-        // Action Bar (Scrollable horizontally on compact screens so every control has room)
+        // Action Bar: [+ Info] [Audible] [ABB] [+ Cal] [DND Book] [DND Series]
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -640,26 +634,16 @@ private fun ReleaseScorecard(
                 active = showInfoDrawer,
                 onClick = { showInfoDrawer = !showInfoDrawer }
             )
-            // Feature #2: Region-safe [ Search App ] & [ Audible -> ]
             BracketButton(
-                label = "Search App",
+                label = "Audible",
                 color = palette.green,
                 onClick = onOpenAudibleSearch
             )
             BracketButton(
-                label = "Audible ->",
-                color = palette.cyan,
-                onClick = { onOpenAudibleDirect(currentAsin) }
+                label = "ABB",
+                color = palette.orange,
+                onClick = onOpenAudioBookBay
             )
-            // Feature #3: Cycle Alternate Regional ASINs if multiple exist
-            if (allAsins.size > 1) {
-                BracketButton(
-                    label = "Alt ASIN (${(selectedAsinIndex % allAsins.size) + 1}/${allAsins.size})",
-                    color = palette.orange,
-                    onClick = { selectedAsinIndex++ }
-                )
-            }
-            // Feature #5: One-Tap Android Calendar Export
             if (rel.releaseDateIso != "TBA") {
                 BracketButton(
                     label = "+ Cal",
@@ -683,23 +667,43 @@ private fun ReleaseScorecard(
     }
 }
 
+/**
+ * Default Live Catalog Search in TRACKED tab, plus list of currently followed sources.
+ * Direct/manual source entry lives in CFG (Settings).
+ */
 @Composable
 private fun TrackedEntitiesView(
     trackedItems: List<TrackedItemEntity>,
     onAddTracked: (TrackType, String, Int) -> Unit,
     onDeleteTracked: (TrackedItemEntity) -> Unit,
-    onUpdateSeriesSeq: (TrackedItemEntity, Int) -> Unit
+    onUpdateSeriesSeq: (TrackedItemEntity, Int) -> Unit,
+    onOpenAbbQuery: (String) -> Unit
 ) {
     val palette = LocalPtsPalette.current
     val scope = rememberCoroutineScope()
 
-    var selectedType by remember { mutableStateOf(TrackType.SERIES) }
-    var inputQuery by remember { mutableStateOf("") }
-    var lastReadInput by remember { mutableStateOf("0") }
-
-    // Feature #4: Live Catalog Search & Preview state
+    var searchQuery by remember { mutableStateOf("") }
     var isSearchingCatalog by remember { mutableStateOf(false) }
-    var catalogPreviewResults by remember { mutableStateOf<List<CatalogProduct>>(emptyList()) }
+    var catalogResults by remember { mutableStateOf<List<CatalogProduct>>(emptyList()) }
+
+    // Lookup set of already-tracked keys ("TYPE:lowercase_value") to prevent duplicates Visually
+    val trackedKeySet = remember(trackedItems) {
+        trackedItems.map { "${it.type.name}:${it.queryValue.trim().lowercase()}" }.toSet()
+    }
+
+    val performLiveSearch = {
+        if (searchQuery.isNotBlank() && !isSearchingCatalog) {
+            scope.launch {
+                isSearchingCatalog = true
+                catalogResults = AudibleApiClient.searchCatalog(
+                    titleOrSeries = searchQuery,
+                    numResults = 15,
+                    forceRefresh = false
+                )
+                isSearchingCatalog = false
+            }
+        }
+    }
 
     LazyColumn(
         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -707,31 +711,20 @@ private fun TrackedEntitiesView(
         modifier = Modifier.fillMaxSize()
     ) {
         item {
-            AsciiBox(headerLabel = "ADD OR SEARCH TRACKED SOURCE") {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    TrackType.values().forEach { t ->
-                        BracketButton(
-                            label = t.name,
-                            active = selectedType == t,
-                            onClick = { selectedType = t }
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(6.dp))
+            AsciiBox(headerLabel = "LIVE AUDIBLE CATALOG SEARCH (DEFAULT)") {
                 MonoText(
-                    text = if (selectedType == TrackType.BOOK) "Enter Book Title or 10-char Audible ASIN:"
-                    else "Enter ${selectedType.name.lowercase().replaceFirstChar { it.uppercase() }} Name:",
+                    text = "Search by book, series, author, or narrator (need manual entry? See [ CFG ]):",
                     color = palette.comment,
-                    fontSizeSp = 12
+                    fontSizeSp = 11
                 )
+                Spacer(modifier = Modifier.height(6.dp))
 
                 BasicTextField(
-                    value = inputQuery,
-                    onValueChange = { inputQuery = it },
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = { performLiveSearch() }),
                     textStyle = TextStyle(
                         fontFamily = FontFamily.Monospace,
                         fontSize = 14.sp,
@@ -744,103 +737,73 @@ private fun TrackedEntitiesView(
                         .padding(10.dp)
                 )
 
-                if (selectedType == TrackType.SERIES) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    MonoText(
-                        text = "Last Completed Book # in Series (for Gap Detector):",
-                        color = palette.comment,
-                        fontSizeSp = 12
-                    )
-                    BasicTextField(
-                        value = lastReadInput,
-                        onValueChange = { lastReadInput = it.filter { ch -> ch.isDigit() } },
-                        textStyle = TextStyle(
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 14.sp,
-                            color = palette.foreground
-                        ),
-                        cursorBrush = SolidColor(palette.cyan),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(palette.surfaceLine.copy(alpha = 0.35f))
-                            .padding(10.dp)
-                    )
-                }
-
                 Spacer(modifier = Modifier.height(6.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    BracketButton(
-                        label = "+ ADD DIRECTLY",
-                        color = palette.green,
-                        onClick = {
-                            if (inputQuery.isNotBlank()) {
-                                onAddTracked(
-                                    selectedType,
-                                    inputQuery,
-                                    lastReadInput.toIntOrNull() ?: 0
-                                )
-                                inputQuery = ""
-                            }
-                        }
-                    )
-                    BracketButton(
-                        label = if (isSearchingCatalog) "SEARCHING..." else "SEARCH LIVE CATALOG",
-                        color = palette.cyan,
-                        onClick = {
-                            if (inputQuery.isNotBlank() && !isSearchingCatalog) {
-                                scope.launch {
-                                    isSearchingCatalog = true
-                                    catalogPreviewResults = AudibleApiClient.searchCatalog(
-                                        titleOrSeries = inputQuery,
-                                        numResults = 12
-                                    )
-                                    isSearchingCatalog = false
-                                }
-                            }
-                        }
-                    )
-                }
-            }
-        }
-
-        // Feature #4: Live Catalog Search Results Preview
-        if (catalogPreviewResults.isNotEmpty()) {
-            item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    MonoText(
-                        text = "LIVE CATALOG MATCHES (${catalogPreviewResults.size})",
-                        color = palette.cyan,
-                        fontSizeSp = 12,
-                        bold = true
-                    )
                     BracketButton(
-                        label = "CLEAR PREVIEW",
-                        color = palette.comment,
-                        onClick = { catalogPreviewResults = emptyList() }
+                        label = if (isSearchingCatalog) "SEARCHING..." else "SEARCH CATALOG",
+                        color = palette.cyan,
+                        onClick = performLiveSearch
                     )
+                    if (searchQuery.isNotBlank()) {
+                        BracketButton(
+                            label = "ABB SEARCH",
+                            color = palette.orange,
+                            onClick = { onOpenAbbQuery(searchQuery) }
+                        )
+                    }
+                    if (catalogResults.isNotEmpty() || searchQuery.isNotBlank()) {
+                        BracketButton(
+                            label = "CLEAR",
+                            color = palette.comment,
+                            onClick = {
+                                searchQuery = ""
+                                catalogResults = emptyList()
+                            }
+                        )
+                    }
                 }
             }
-            items(catalogPreviewResults, key = { "preview_${it.asin}" }) { prod ->
+        }
+
+        if (catalogResults.isNotEmpty()) {
+            item {
+                MonoText(
+                    text = "LIVE CATALOG RESULTS (${catalogResults.size}) - TAP TO FOLLOW:",
+                    color = palette.cyan,
+                    fontSizeSp = 12,
+                    bold = true
+                )
+            }
+            items(catalogResults, key = { "live_${it.asin}" }) { prod ->
+                val seriesTracked = prod.seriesTitle.isNotBlank() &&
+                    "SERIES:${prod.seriesTitle.trim().lowercase()}" in trackedKeySet
+                val firstAuthor = prod.authors.firstOrNull()?.trim().orEmpty()
+                val authorTracked = firstAuthor.isNotBlank() &&
+                    "AUTHOR:${firstAuthor.lowercase()}" in trackedKeySet
+                val firstNarrator = prod.narrators.firstOrNull()?.trim().orEmpty()
+                val narratorTracked = firstNarrator.isNotBlank() &&
+                    "NARRATOR:${firstNarrator.lowercase()}" in trackedKeySet
+                val bookTracked = "BOOK:${prod.asin.lowercase()}" in trackedKeySet ||
+                    "BOOK:${prod.title.trim().lowercase()}" in trackedKeySet
+
                 AsciiBox(
                     headerLabel = "${prod.releaseDateIso} • ${prod.asin}",
                     borderColor = palette.cyan,
                     headerColor = palette.cyan
                 ) {
                     Row(verticalAlignment = Alignment.Top) {
-                        CoverThumbnail(coverUrl = prod.coverUrl, sizeDp = 48.dp)
+                        CoverThumbnail(coverUrl = prod.coverUrl, sizeDp = 50.dp)
                         Spacer(modifier = Modifier.width(8.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             MonoText(text = prod.title, bold = true, fontSizeSp = 13)
                             if (prod.seriesTitle.isNotBlank()) {
+                                val seqPart = prod.seriesSequence?.let { " #$it" }.orEmpty()
                                 MonoText(
-                                    text = "Series: ${prod.seriesTitle}",
+                                    text = "Series: ${prod.seriesTitle}$seqPart",
                                     color = palette.purple,
                                     fontSizeSp = 12
                                 )
@@ -864,39 +827,53 @@ private fun TrackedEntitiesView(
                     ) {
                         if (prod.seriesTitle.isNotBlank()) {
                             BracketButton(
-                                label = "+ Series",
+                                label = if (seriesTracked) "✓ Series" else "+ Series",
+                                active = seriesTracked,
                                 color = palette.purple,
                                 onClick = {
-                                    onAddTracked(
-                                        TrackType.SERIES,
-                                        prod.seriesTitle,
-                                        lastReadInput.toIntOrNull() ?: 0
-                                    )
+                                    onAddTracked(TrackType.SERIES, prod.seriesTitle, 0)
                                 }
                             )
                         }
-                        prod.authors.firstOrNull()?.let { firstAuthor ->
+                        if (firstAuthor.isNotBlank()) {
                             BracketButton(
-                                label = "+ Author",
+                                label = if (authorTracked) "✓ Author" else "+ Author",
+                                active = authorTracked,
                                 color = palette.yellow,
                                 onClick = { onAddTracked(TrackType.AUTHOR, firstAuthor, 0) }
                             )
                         }
-                        prod.narrators.firstOrNull()?.let { firstNarrator ->
+                        if (firstNarrator.isNotBlank()) {
                             BracketButton(
-                                label = "+ Narrator",
+                                label = if (narratorTracked) "✓ Narrator" else "+ Narrator",
+                                active = narratorTracked,
                                 color = palette.orange,
                                 onClick = { onAddTracked(TrackType.NARRATOR, firstNarrator, 0) }
                             )
                         }
                         BracketButton(
-                            label = "+ Book",
+                            label = if (bookTracked) "✓ Book" else "+ Book",
+                            active = bookTracked,
                             color = palette.green,
                             onClick = { onAddTracked(TrackType.BOOK, prod.asin, 0) }
+                        )
+                        BracketButton(
+                            label = "ABB",
+                            color = palette.orange,
+                            onClick = { onOpenAbbQuery("${prod.title} $firstAuthor") }
                         )
                     }
                 }
             }
+        }
+
+        item {
+            MonoText(
+                text = "FOLLOWED SOURCES (${trackedItems.size}):",
+                color = palette.purple,
+                fontSizeSp = 12,
+                bold = true
+            )
         }
 
         items(trackedItems, key = { it.id }) { item ->
@@ -931,6 +908,11 @@ private fun TrackedEntitiesView(
                                 onClick = { onUpdateSeriesSeq(item, item.lastReadSequence + 1) }
                             )
                         }
+                        BracketButton(
+                            label = "ABB",
+                            color = palette.orange,
+                            onClick = { onOpenAbbQuery(item.queryValue) }
+                        )
                         BracketButton(
                             label = "x",
                             color = palette.red,
@@ -998,20 +980,102 @@ private fun DndListView(
 private fun SettingsAndBackupView(
     prefs: FilterPrefs,
     onUpdatePrefs: (FilterPrefs) -> Unit,
+    onAddTrackedDirect: (TrackType, String, Int) -> Unit,
     onExportBackup: () -> Unit,
     onImportBackup: () -> Unit
 ) {
     val palette = LocalPtsPalette.current
+    var directType by remember { mutableStateOf(TrackType.SERIES) }
+    var directQuery by remember { mutableStateOf("") }
+    var directLastRead by remember { mutableStateOf("0") }
+
     LazyColumn(
         verticalArrangement = Arrangement.spacedBy(12.dp),
         contentPadding = PaddingValues(bottom = 84.dp),
         modifier = Modifier.fillMaxSize()
     ) {
-        // Feature #2: Audible Store / Marketplace Region Selector
+        // Direct Manual Add Option in Settings (CFG)
         item {
-            AsciiBox(headerLabel = "AUDIBLE STORE REGION (FOR DEEP LINKS)") {
+            AsciiBox(headerLabel = "ADD TRACKED SOURCE DIRECTLY") {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    TrackType.values().forEach { t ->
+                        BracketButton(
+                            label = t.name,
+                            active = directType == t,
+                            onClick = { directType = t }
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(6.dp))
                 MonoText(
-                    text = "Select the Audible marketplace matching your account so [ Search App ] and [ Audible -> ] open without country/region blocks:",
+                    text = if (directType == TrackType.BOOK) "Enter Book Title or 10-char Audible ASIN:"
+                    else "Enter Exact ${directType.name.lowercase().replaceFirstChar { it.uppercase() }} Name:",
+                    color = palette.comment,
+                    fontSizeSp = 12
+                )
+                BasicTextField(
+                    value = directQuery,
+                    onValueChange = { directQuery = it },
+                    singleLine = true,
+                    textStyle = TextStyle(
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 14.sp,
+                        color = palette.foreground
+                    ),
+                    cursorBrush = SolidColor(palette.cyan),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(palette.surfaceLine.copy(alpha = 0.35f))
+                        .padding(10.dp)
+                )
+                if (directType == TrackType.SERIES) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    MonoText(
+                        text = "Last Completed Book # in Series (for Gap Detector):",
+                        color = palette.comment,
+                        fontSizeSp = 12
+                    )
+                    BasicTextField(
+                        value = directLastRead,
+                        onValueChange = { directLastRead = it.filter { ch -> ch.isDigit() } },
+                        singleLine = true,
+                        textStyle = TextStyle(
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 14.sp,
+                            color = palette.foreground
+                        ),
+                        cursorBrush = SolidColor(palette.cyan),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(palette.surfaceLine.copy(alpha = 0.35f))
+                            .padding(10.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                BracketButton(
+                    label = "+ ADD DIRECTLY",
+                    color = palette.green,
+                    onClick = {
+                        if (directQuery.isNotBlank()) {
+                            onAddTrackedDirect(
+                                directType,
+                                directQuery,
+                                directLastRead.toIntOrNull() ?: 0
+                            )
+                            directQuery = ""
+                        }
+                    }
+                )
+            }
+        }
+
+        item {
+            AsciiBox(headerLabel = "AUDIBLE STORE REGION") {
+                MonoText(
+                    text = "Select the Audible marketplace matching your account for the [ Audible ] button:",
                     color = palette.comment,
                     fontSizeSp = 12
                 )

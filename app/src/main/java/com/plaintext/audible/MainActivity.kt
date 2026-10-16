@@ -51,7 +51,7 @@ class MainActivity : ComponentActivity() {
                 if (!raw.isNullOrBlank()) {
                     withContext(Dispatchers.IO) {
                         BackupManager.importJson(repo, raw)
-                        repo.syncCatalog()
+                        repo.syncCatalog(forceRefresh = false)
                     }
                     Toast.makeText(this@MainActivity, "[ Backup Restored ]", Toast.LENGTH_SHORT).show()
                 }

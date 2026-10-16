@@ -2,6 +2,9 @@ package com.plaintext.audible.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import java.time.LocalDate
 
 enum class AudibleMarketplace(val code: String, val domain: String, val label: String) {
@@ -36,6 +39,10 @@ class ReleaseRepository(context: Context) {
     private val prefs: SharedPreferences =
         context.getSharedPreferences("pts_audible_prefs", Context.MODE_PRIVATE)
 
+    init {
+        AudibleApiClient.initCache(context.applicationContext.cacheDir)
+    }
+
     fun getPrefs(): FilterPrefs = FilterPrefs(
         englishOnly = prefs.getBoolean("english_only", true),
         hideAbridged = prefs.getBoolean("hide_abridged", true),
@@ -58,6 +65,36 @@ class ReleaseRepository(context: Context) {
             .apply()
     }
 
+    /**
+     * Adds a tracked item only if an identical (type, case-insensitive queryValue) does not already exist.
+     * Returns true if newly inserted, or false if it was already tracked.
+     */
+    suspend fun addTrackedItemUnique(
+        type: TrackType,
+        rawQuery: String,
+        lastReadSequence: Int = 0
+    ): Boolean {
+        val cleaned = rawQuery.trim()
+        if (cleaned.isBlank()) return false
+
+        val existing = dao.findTrackedItem(type, cleaned)
+        if (existing != null) {
+            if (type == TrackType.SERIES && lastReadSequence > existing.lastReadSequence) {
+                dao.updateSeriesReadSequence(existing.id, lastReadSequence)
+            }
+            return false
+        }
+
+        dao.insertTrackedItem(
+            TrackedItemEntity(
+                type = type,
+                queryValue = cleaned,
+                lastReadSequence = lastReadSequence
+            )
+        )
+        return true
+    }
+
     private data class EditionGroup(
         var primaryProduct: CatalogProduct,
         val matchedSources: MutableSet<String> = linkedSetOf(),
@@ -65,12 +102,16 @@ class ReleaseRepository(context: Context) {
     )
 
     /**
-     * Synchronizes tracked Series, Authors, Narrators, and individual Books against
-     * Audible's live catalog, deduplicating source clashes AND grouping regional sibling ASINs
-     * (Feature #3: US vs. International editions of the same book).
+     * Synchronizes tracked Series, Authors, Narrators, and individual Books concurrently
+     * using cached or fresh Audible catalog metadata, deduplicating clashes and DND rules.
      */
-    suspend fun syncCatalog(): List<ReleaseEntity> {
+    suspend fun syncCatalog(forceRefresh: Boolean = false): List<ReleaseEntity> {
         val tracked = dao.getAllTrackedItems()
+        if (tracked.isEmpty()) {
+            dao.clearAllReleases()
+            return emptyList()
+        }
+
         val dndRules = dao.getAllDndRules()
         val existingByAsin = dao.getAllReleases().associateBy { it.asin }
         val filterPrefs = getPrefs()
@@ -81,21 +122,37 @@ class ReleaseRepository(context: Context) {
         val dndSeries = dndRules.filter { it.targetType == DndTargetType.SERIES }
             .map { it.targetKey.lowercase() }.toSet()
 
-        // Group key: normalized title + primary author + releaseDate so duplicate US/UK/Intl
-        // publisher editions merge cleanly into one card with switchable [ Alt ASIN ]
+        // Fetch all tracked items in parallel for fast sync
+        val fetchedPairs = coroutineScope {
+            tracked.map { item ->
+                async {
+                    val results = when (item.type) {
+                        TrackType.AUTHOR -> AudibleApiClient.searchCatalog(
+                            author = item.queryValue,
+                            forceRefresh = forceRefresh
+                        )
+                        TrackType.NARRATOR -> AudibleApiClient.searchCatalog(
+                            narrator = item.queryValue,
+                            forceRefresh = forceRefresh
+                        )
+                        TrackType.SERIES -> AudibleApiClient.searchCatalog(
+                            titleOrSeries = item.queryValue,
+                            forceRefresh = forceRefresh
+                        )
+                        TrackType.BOOK -> AudibleApiClient.searchCatalog(
+                            asin = item.externalId ?: item.queryValue,
+                            titleOrSeries = item.queryValue,
+                            forceRefresh = forceRefresh
+                        )
+                    }
+                    item to results
+                }
+            }.awaitAll()
+        }
+
         val groupedEditions = linkedMapOf<String, EditionGroup>()
 
-        for (item in tracked) {
-            val results = when (item.type) {
-                TrackType.AUTHOR -> AudibleApiClient.searchCatalog(author = item.queryValue)
-                TrackType.NARRATOR -> AudibleApiClient.searchCatalog(narrator = item.queryValue)
-                TrackType.SERIES -> AudibleApiClient.searchCatalog(titleOrSeries = item.queryValue)
-                TrackType.BOOK -> AudibleApiClient.searchCatalog(
-                    asin = item.externalId ?: item.queryValue,
-                    titleOrSeries = item.queryValue
-                )
-            }
-
+        for ((item, results) in fetchedPairs) {
             for (prod in results) {
                 if (item.type == TrackType.SERIES &&
                     !prod.seriesTitle.contains(item.queryValue, ignoreCase = true) &&
@@ -136,7 +193,6 @@ class ReleaseRepository(context: Context) {
                 val group = groupedEditions.getOrPut(groupKey) {
                     EditionGroup(primaryProduct = prod)
                 }
-                // Prefer an edition that has a cover image and synopsis if primary was sparse
                 if (group.primaryProduct.coverUrl.isBlank() && prod.coverUrl.isNotBlank()) {
                     group.primaryProduct = prod
                 }
@@ -176,9 +232,11 @@ class ReleaseRepository(context: Context) {
             )
         }
 
-        dao.clearAllReleases()
-        if (finalEntities.isNotEmpty()) {
+        if (finalEntities.isEmpty()) {
+            dao.clearAllReleases()
+        } else {
             dao.upsertReleases(finalEntities)
+            dao.deleteReleasesNotIn(finalEntities.map { it.asin })
         }
         return dao.getAllReleases()
     }
