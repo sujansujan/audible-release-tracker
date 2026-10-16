@@ -90,7 +90,7 @@ class ReleaseCheckWorker(
         )
 
         val builder = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_popup_reminder)
+            .setSmallIcon(com.plaintext.audible.R.drawable.ic_stat_pts_book)
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))

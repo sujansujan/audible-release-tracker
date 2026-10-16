@@ -83,7 +83,7 @@ class ReleaseRepository(context: Context) {
 
         // Group key: normalized title + primary author + releaseDate so duplicate US/UK/Intl
         // publisher editions merge cleanly into one card with switchable [ Alt ASIN ]
-        val groupedEditions = linkedMapOf<String, class EditionGroup>()
+        val groupedEditions = linkedMapOf<String, EditionGroup>()
 
         for (item in tracked) {
             val results = when (item.type) {
@@ -134,7 +134,7 @@ class ReleaseRepository(context: Context) {
                 val groupKey = "${normTitle}_${normAuthor}_${prod.releaseDateIso}"
 
                 val group = groupedEditions.getOrPut(groupKey) {
-                    class EditionGroup(primaryProduct = prod)
+                    EditionGroup(primaryProduct = prod)
                 }
                 // Prefer an edition that has a cover image and synopsis if primary was sparse
                 if (group.primaryProduct.coverUrl.isBlank() && prod.coverUrl.isNotBlank()) {
