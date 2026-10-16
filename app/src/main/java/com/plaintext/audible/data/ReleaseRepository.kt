@@ -4,14 +4,31 @@ import android.content.Context
 import android.content.SharedPreferences
 import java.time.LocalDate
 
+enum class AudibleMarketplace(val code: String, val domain: String, val label: String) {
+    US("US", "audible.com", "US (.com)"),
+    IN("IN", "audible.in", "IN (.in)"),
+    UK("UK", "audible.co.uk", "UK (.co.uk)"),
+    CA("CA", "audible.ca", "CA (.ca)"),
+    AU("AU", "audible.com.au", "AU (.com.au)");
+
+    companion object {
+        fun fromCode(code: String): AudibleMarketplace =
+            values().firstOrNull { it.code.equals(code, ignoreCase = true) } ?: US
+    }
+}
+
 data class FilterPrefs(
     val englishOnly: Boolean = true,
     val hideAbridged: Boolean = true,
     val hideDramatized: Boolean = false,
     val isDarkTheme: Boolean = true,
     val notifyHour: Int = 9,
-    val notifyMinute: Int = 0
-)
+    val notifyMinute: Int = 0,
+    val marketplaceCode: String = "US"
+) {
+    val marketplace: AudibleMarketplace
+        get() = AudibleMarketplace.fromCode(marketplaceCode)
+}
 
 class ReleaseRepository(context: Context) {
     private val db = AppDatabase.get(context)
@@ -25,7 +42,8 @@ class ReleaseRepository(context: Context) {
         hideDramatized = prefs.getBoolean("hide_dramatized", false),
         isDarkTheme = prefs.getBoolean("dark_theme", true),
         notifyHour = prefs.getInt("notify_hour", 9),
-        notifyMinute = prefs.getInt("notify_minute", 0)
+        notifyMinute = prefs.getInt("notify_minute", 0),
+        marketplaceCode = prefs.getString("marketplace_code", "US") ?: "US"
     )
 
     fun savePrefs(newPrefs: FilterPrefs) {
@@ -36,9 +54,21 @@ class ReleaseRepository(context: Context) {
             .putBoolean("dark_theme", newPrefs.isDarkTheme)
             .putInt("notify_hour", newPrefs.notifyHour)
             .putInt("notify_minute", newPrefs.notifyMinute)
+            .putString("marketplace_code", newPrefs.marketplaceCode)
             .apply()
     }
 
+    private data class EditionGroup(
+        var primaryProduct: CatalogProduct,
+        val matchedSources: MutableSet<String> = linkedSetOf(),
+        val editionAsins: MutableSet<String> = linkedSetOf()
+    )
+
+    /**
+     * Synchronizes tracked Series, Authors, Narrators, and individual Books against
+     * Audible's live catalog, deduplicating source clashes AND grouping regional sibling ASINs
+     * (Feature #3: US vs. International editions of the same book).
+     */
     suspend fun syncCatalog(): List<ReleaseEntity> {
         val tracked = dao.getAllTrackedItems()
         val dndRules = dao.getAllDndRules()
@@ -51,7 +81,9 @@ class ReleaseRepository(context: Context) {
         val dndSeries = dndRules.filter { it.targetType == DndTargetType.SERIES }
             .map { it.targetKey.lowercase() }.toSet()
 
-        val mergedMap = linkedMapOf<String, Pair<CatalogProduct, MutableSet<String>>>()
+        // Group key: normalized title + primary author + releaseDate so duplicate US/UK/Intl
+        // publisher editions merge cleanly into one card with switchable [ Alt ASIN ]
+        val groupedEditions = linkedMapOf<String, class EditionGroup>()
 
         for (item in tracked) {
             val results = when (item.type) {
@@ -94,12 +126,27 @@ class ReleaseRepository(context: Context) {
                 if (prod.seriesTitle.isNotBlank() && prod.seriesTitle.lowercase() in dndSeries) continue
                 if (prod.seriesAsin.isNotBlank() && prod.seriesAsin.lowercase() in dndSeries) continue
 
-                val entry = mergedMap.getOrPut(prod.asin) { prod to linkedSetOf() }
-                entry.second.add(item.type.name)
+                val normTitle = prod.title.lowercase()
+                    .replace(Regex("\\(.*?\\)"), "")
+                    .replace(Regex("[^a-z0-9]"), "")
+                val normAuthor = prod.authors.firstOrNull()?.lowercase()
+                    ?.replace(Regex("[^a-z0-9]"), "") ?: ""
+                val groupKey = "${normTitle}_${normAuthor}_${prod.releaseDateIso}"
+
+                val group = groupedEditions.getOrPut(groupKey) {
+                    class EditionGroup(primaryProduct = prod)
+                }
+                // Prefer an edition that has a cover image and synopsis if primary was sparse
+                if (group.primaryProduct.coverUrl.isBlank() && prod.coverUrl.isNotBlank()) {
+                    group.primaryProduct = prod
+                }
+                group.matchedSources.add(item.type.name)
+                group.editionAsins.add(prod.asin)
             }
         }
 
-        val finalEntities = mergedMap.values.map { (prod, matchedSet) ->
+        val finalEntities = groupedEditions.values.map { group ->
+            val prod = group.primaryProduct
             val prev = existingByAsin[prod.asin]
             val isDramatized = prod.title.contains("Dramatized", ignoreCase = true) ||
                 prod.subtitle.contains("Dramatized", ignoreCase = true)
@@ -116,14 +163,20 @@ class ReleaseRepository(context: Context) {
                 language = prod.language.replaceFirstChar { it.uppercase() },
                 isAbridged = prod.formatType.equals("abridged", ignoreCase = true),
                 isDramatized = isDramatized,
-                matchedTags = matchedSet.joinToString(","),
+                matchedTags = group.matchedSources.joinToString(","),
                 isNewDiscovery = prev?.isNewDiscovery ?: true,
                 notifiedSevenDay = prev?.notifiedSevenDay ?: false,
                 notifiedReleaseDay = prev?.notifiedReleaseDay ?: false,
-                firstSeenEpochMs = prev?.firstSeenEpochMs ?: System.currentTimeMillis()
+                firstSeenEpochMs = prev?.firstSeenEpochMs ?: System.currentTimeMillis(),
+                coverUrl = prod.coverUrl,
+                synopsis = prod.synopsis,
+                runtimeMinutes = prod.runtimeMinutes,
+                publisher = prod.publisher,
+                altAsins = group.editionAsins.joinToString(",")
             )
         }
 
+        dao.clearAllReleases()
         if (finalEntities.isNotEmpty()) {
             dao.upsertReleases(finalEntities)
         }

@@ -1,5 +1,6 @@
 package com.plaintext.audible.data
 
+import androidx.core.text.HtmlCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -18,37 +19,44 @@ data class CatalogProduct(
     val seriesSequence: Int?,
     val releaseDateIso: String,
     val language: String,
-    val formatType: String
+    val formatType: String,
+    val coverUrl: String,
+    val synopsis: String,
+    val runtimeMinutes: Int,
+    val publisher: String
 )
 
 object AudibleApiClient {
     private const val BASE_URL = "https://api.audible.com/1.0/catalog/products"
     private const val RESPONSE_GROUPS =
-        "contributors,product_attrs,product_desc,product_extended_attrs,series,relationships"
+        "contributors,product_attrs,product_desc,product_extended_attrs,series,relationships,media"
+    private const val IMAGE_SIZES = "252,500"
 
     suspend fun searchCatalog(
         author: String? = null,
         narrator: String? = null,
         titleOrSeries: String? = null,
-        asin: String? = null
+        asin: String? = null,
+        numResults: Int = 40
     ): List<CatalogProduct> = withContext(Dispatchers.IO) {
-        if (!asin.isNullOrBlank() && asin.matches(Regex("^[A-Z0-9]{10}$", RegexOption.IGNORE_CASE))) {
-            return@withContext fetchByAsin(asin.uppercase())
+        if (!asin.isNullOrBlank() && asin.trim().matches(Regex("^[A-Z0-9]{10}$", RegexOption.IGNORE_CASE))) {
+            return@withContext fetchByAsin(asin.trim().uppercase())
         }
 
         val params = mutableListOf(
             "response_groups=$RESPONSE_GROUPS",
+            "image_sizes=$IMAGE_SIZES",
             "products_sort_by=-ReleaseDate",
-            "num_results=40"
+            "num_results=$numResults"
         )
         author?.takeIf { it.isNotBlank() }?.let {
-            params += "author=${URLEncoder.encode(it, "UTF-8")}"
+            params += "author=${URLEncoder.encode(it.trim(), "UTF-8")}"
         }
         narrator?.takeIf { it.isNotBlank() }?.let {
-            params += "narrator=${URLEncoder.encode(it, "UTF-8")}"
+            params += "narrator=${URLEncoder.encode(it.trim(), "UTF-8")}"
         }
         titleOrSeries?.takeIf { it.isNotBlank() }?.let {
-            params += "keywords=${URLEncoder.encode(it, "UTF-8")}"
+            params += "keywords=${URLEncoder.encode(it.trim(), "UTF-8")}"
         }
 
         val url = URL("$BASE_URL?${params.joinToString("&")}")
@@ -57,7 +65,7 @@ object AudibleApiClient {
     }
 
     private fun fetchByAsin(asin: String): List<CatalogProduct> {
-        val url = URL("$BASE_URL/$asin?response_groups=$RESPONSE_GROUPS")
+        val url = URL("$BASE_URL/$asin?response_groups=$RESPONSE_GROUPS&image_sizes=$IMAGE_SIZES")
         val jsonStr = executeGet(url) ?: return emptyList()
         val root = JSONObject(jsonStr)
         val prodObj = root.optJSONObject("product") ?: return emptyList()
@@ -70,7 +78,7 @@ object AudibleApiClient {
             connectTimeout = 12_000
             readTimeout = 12_000
             setRequestProperty("Accept", "application/json")
-            setRequestProperty("User-Agent", "PlainTextAudibleTracker/1.0 (Android)")
+            setRequestProperty("User-Agent", "PlainTextAudibleTracker/1.1 (Android)")
         }
         return try {
             if (conn.responseCode in 200..299) {
@@ -132,6 +140,27 @@ object AudibleApiClient {
         val language = obj.optString("language", "english")
         val formatType = obj.optString("format_type", "unabridged")
 
+        // Extract square cover thumbnail URL from product_images
+        var coverUrl = ""
+        obj.optJSONObject("product_images")?.let { imgObj ->
+            coverUrl = imgObj.optString("252").ifBlank { imgObj.optString("500") }
+        }
+
+        // Extract and strip HTML from synopsis (Feature #1)
+        val rawHtmlSummary = obj.optString("publisher_summary")
+            .ifBlank { obj.optString("merchandising_summary", "") }
+        val cleanSynopsis = if (rawHtmlSummary.isNotBlank()) {
+            HtmlCompat.fromHtml(rawHtmlSummary, HtmlCompat.FROM_HTML_MODE_COMPACT)
+                .toString()
+                .replace(Regex("\\s+"), " ")
+                .trim()
+        } else {
+            ""
+        }
+
+        val runtimeMinutes = obj.optInt("runtime_length_min", 0)
+        val publisher = obj.optString("publisher_name", "")
+
         return CatalogProduct(
             asin = asin,
             title = title,
@@ -143,7 +172,11 @@ object AudibleApiClient {
             seriesSequence = seriesSeq,
             releaseDateIso = releaseDate,
             language = language,
-            formatType = formatType
+            formatType = formatType,
+            coverUrl = coverUrl,
+            synopsis = cleanSynopsis,
+            runtimeMinutes = runtimeMinutes,
+            publisher = publisher
         )
     }
 }

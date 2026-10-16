@@ -8,7 +8,7 @@ object BackupManager {
         val root = JSONObject()
         val prefs = repo.getPrefs()
 
-        root.put("version", 1)
+        root.put("version", 2)
         root.put("prefs", JSONObject().apply {
             put("englishOnly", prefs.englishOnly)
             put("hideAbridged", prefs.hideAbridged)
@@ -16,6 +16,7 @@ object BackupManager {
             put("isDarkTheme", prefs.isDarkTheme)
             put("notifyHour", prefs.notifyHour)
             put("notifyMinute", prefs.notifyMinute)
+            put("marketplaceCode", prefs.marketplaceCode)
         })
 
         val trackedArr = JSONArray()
@@ -52,7 +53,8 @@ object BackupManager {
                     hideDramatized = p.optBoolean("hideDramatized", false),
                     isDarkTheme = p.optBoolean("isDarkTheme", true),
                     notifyHour = p.optInt("notifyHour", 9),
-                    notifyMinute = p.optInt("notifyMinute", 0)
+                    notifyMinute = p.optInt("notifyMinute", 0),
+                    marketplaceCode = p.optString("marketplaceCode", "US")
                 )
             )
         }

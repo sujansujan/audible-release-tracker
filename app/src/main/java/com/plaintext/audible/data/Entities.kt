@@ -47,5 +47,10 @@ data class ReleaseEntity(
     val isNewDiscovery: Boolean = true,
     val notifiedSevenDay: Boolean = false,
     val notifiedReleaseDay: Boolean = false,
-    val firstSeenEpochMs: Long = System.currentTimeMillis()
+    val firstSeenEpochMs: Long = System.currentTimeMillis(),
+    val coverUrl: String = "",       // 252px/500px square cover thumbnail URL
+    val synopsis: String = "",       // Plain-text summary from product_desc
+    val runtimeMinutes: Int = 0,     // Runtime length in minutes
+    val publisher: String = "",      // Publisher name
+    val altAsins: String = ""        // Comma-separated all edition ASINs (US + International)
 )

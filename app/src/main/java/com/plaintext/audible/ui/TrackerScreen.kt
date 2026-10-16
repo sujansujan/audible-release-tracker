@@ -2,16 +2,29 @@ package com.plaintext.audible.ui
 
 import android.content.Intent
 import android.net.Uri
+import android.provider.CalendarContract
+import android.widget.Toast
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -20,11 +33,21 @@ import androidx.compose.ui.unit.sp
 import com.plaintext.audible.data.*
 import com.plaintext.audible.worker.ReleaseCheckWorker
 import kotlinx.coroutines.launch
+import java.net.URLEncoder
 import java.time.LocalDate
+import java.time.ZoneOffset
 import java.time.temporal.ChronoUnit
 
 enum class ActiveTab {
     UPCOMING, TRACKED, DND, SETTINGS
+}
+
+enum class QuickFilter(val label: String) {
+    ALL("ALL"),
+    SERIES("SERIES"),
+    AUTHOR("AUTHOR"),
+    NARRATOR("NARRATOR"),
+    SOON_30D("<=30d")
 }
 
 @Composable
@@ -44,8 +67,24 @@ fun TrackerScreen(
     val dndRules by repo.dao.observeDndRules().collectAsState(initial = emptyList())
 
     var activeTab by remember { mutableStateOf(ActiveTab.UPCOMING) }
+    var activeFilter by remember { mutableStateOf(QuickFilter.ALL) }
     var isSyncing by remember { mutableStateOf(false) }
     var showTbaExpanded by remember { mutableStateOf(false) }
+
+    // Auto-hide bottom bar when scrolling down, show when scrolling up
+    var isBottomBarVisible by remember { mutableStateOf(true) }
+    val nestedScrollConnection = remember {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (available.y < -6f) {
+                    isBottomBarVisible = false
+                } else if (available.y > 6f) {
+                    isBottomBarVisible = true
+                }
+                return Offset.Zero
+            }
+        }
+    }
 
     val seriesReadMap = remember(trackedItems) {
         trackedItems.filter { it.type == TrackType.SERIES }
@@ -53,147 +92,235 @@ fun TrackerScreen(
     }
 
     CompositionLocalProvider(LocalPtsPalette provides palette) {
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(palette.background)
                 .systemBarsPadding()
-                .padding(horizontal = 12.dp, vertical = 8.dp)
+                .nestedScroll(nestedScrollConnection)
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
             ) {
-                MonoText(
-                    text = "PTS // AUDIBLE US",
-                    color = palette.purple,
-                    fontSizeSp = 16,
-                    bold = true
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    BracketButton(
-                        label = if (isSyncing) "SYNCING..." else "SYNC",
-                        color = palette.green,
-                        onClick = {
-                            if (!isSyncing) {
+                // Top Header Bar
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    MonoText(
+                        text = "PTS // AUDIBLE ${prefs.marketplace.code}",
+                        color = palette.purple,
+                        fontSizeSp = 15,
+                        bold = true
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        BracketButton(
+                            label = if (isSyncing) "SYNCING..." else "SYNC",
+                            color = palette.green,
+                            onClick = {
+                                if (!isSyncing) {
+                                    scope.launch {
+                                        isSyncing = true
+                                        repo.syncCatalog()
+                                        isSyncing = false
+                                    }
+                                }
+                            }
+                        )
+                        BracketButton(
+                            label = palette.name,
+                            color = palette.orange,
+                            onClick = {
+                                val updated = prefs.copy(isDarkTheme = !prefs.isDarkTheme)
+                                prefs = updated
+                                repo.savePrefs(updated)
+                            }
+                        )
+                    }
+                }
+
+                HorizontalDivider(color = palette.surfaceLine, thickness = 1.dp)
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // Main Content Area
+                Box(modifier = Modifier.weight(1f)) {
+                    when (activeTab) {
+                        ActiveTab.UPCOMING -> UpcomingFeedView(
+                            releases = releases,
+                            quickFilter = activeFilter,
+                            trackedSeriesMap = seriesReadMap,
+                            showTbaExpanded = showTbaExpanded,
+                            onToggleTba = { showTbaExpanded = !showTbaExpanded },
+                            onClearNewBadges = { scope.launch { repo.dao.clearNewDiscoveryFlags() } },
+                            onOpenAudibleDirect = { asin ->
+                                val domain = prefs.marketplace.domain
+                                val url = "https://www.$domain/pd/$asin?ipRedirectOverride=true&overrideBaseCountry=true"
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                            },
+                            onOpenAudibleSearch = { rel ->
+                                val domain = prefs.marketplace.domain
+                                val primaryAuthor = rel.authors.split(",").firstOrNull()?.trim().orEmpty()
+                                val q = URLEncoder.encode("${rel.title} $primaryAuthor".trim(), "UTF-8")
+                                val url = "https://www.$domain/search?keywords=$q&ipRedirectOverride=true&overrideBaseCountry=true"
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                            },
+                            onExportCalendar = { rel ->
+                                val date = runCatching { LocalDate.parse(rel.releaseDateIso) }.getOrNull()
+                                if (date != null) {
+                                    val startMs = date.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
+                                    val calIntent = Intent(Intent.ACTION_INSERT).apply {
+                                        data = CalendarContract.Events.CONTENT_URI
+                                        putExtra(CalendarContract.Events.TITLE, "Audible Release: ${rel.title}")
+                                        putExtra(
+                                            CalendarContract.Events.DESCRIPTION,
+                                            "By ${rel.authors} • Narrated by ${rel.narrators} • Series: ${rel.seriesTitle} • ASIN: ${rel.asin}"
+                                        )
+                                        putExtra(CalendarContract.EXTRA_EVENT_ALL_DAY, true)
+                                        putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, startMs)
+                                        putExtra(CalendarContract.EXTRA_EVENT_END_TIME, startMs + 86_400_000L)
+                                    }
+                                    runCatching { context.startActivity(calIntent) }.onFailure {
+                                        Toast.makeText(context, "No Calendar app found", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            },
+                            onQuickTrack = { type, value ->
                                 scope.launch {
+                                    repo.dao.insertTrackedItem(TrackedItemEntity(type = type, queryValue = value))
+                                    Toast.makeText(context, "[ Tracked $type: $value ]", Toast.LENGTH_SHORT).show()
                                     isSyncing = true
                                     repo.syncCatalog()
                                     isSyncing = false
                                 }
+                            },
+                            onMuteBook = { rel -> scope.launch { repo.muteBook(rel.asin, rel.title) } },
+                            onMuteSeries = { rel ->
+                                scope.launch { repo.muteSeries(rel.seriesTitle, rel.seriesTitle) }
+                            },
+                            onMarkPriorRead = { trackedSeries, seq ->
+                                scope.launch { repo.dao.updateSeriesReadSequence(trackedSeries.id, seq) }
                             }
-                        }
-                    )
-                    BracketButton(
-                        label = palette.name,
-                        color = palette.orange,
-                        onClick = {
-                            val updated = prefs.copy(isDarkTheme = !prefs.isDarkTheme)
-                            prefs = updated
-                            repo.savePrefs(updated)
-                        }
-                    )
+                        )
+
+                        ActiveTab.TRACKED -> TrackedEntitiesView(
+                            trackedItems = trackedItems,
+                            onAddTracked = { type, query, lastRead ->
+                                scope.launch {
+                                    repo.dao.insertTrackedItem(
+                                        TrackedItemEntity(
+                                            type = type,
+                                            queryValue = query.trim(),
+                                            lastReadSequence = lastRead
+                                        )
+                                    )
+                                    isSyncing = true
+                                    repo.syncCatalog()
+                                    isSyncing = false
+                                }
+                            },
+                            onDeleteTracked = { item ->
+                                scope.launch { repo.dao.deleteTrackedItem(item) }
+                            },
+                            onUpdateSeriesSeq = { item, newSeq ->
+                                scope.launch { repo.dao.updateSeriesReadSequence(item.id, newSeq) }
+                            }
+                        )
+
+                        ActiveTab.DND -> DndListView(
+                            dndRules = dndRules,
+                            onRemoveRule = { rule ->
+                                scope.launch { repo.dao.deleteDndRule(rule) }
+                            }
+                        )
+
+                        ActiveTab.SETTINGS -> SettingsAndBackupView(
+                            prefs = prefs,
+                            onUpdatePrefs = { updated ->
+                                prefs = updated
+                                repo.savePrefs(updated)
+                                ReleaseCheckWorker.scheduleDailyCheck(
+                                    context,
+                                    updated.notifyHour,
+                                    updated.notifyMinute
+                                )
+                            },
+                            onExportBackup = onExportBackup,
+                            onImportBackup = onImportBackup
+                        )
+                    }
                 }
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
+            // Feature #6: Auto-Hiding Bottom Navigation Bar & Quick Filter Strip
+            AnimatedVisibility(
+                visible = isBottomBarVisible,
+                enter = slideInVertically(initialOffsetY = { it }),
+                exit = slideOutVertically(targetOffsetY = { it }),
+                modifier = Modifier.align(Alignment.BottomCenter)
             ) {
-                BracketButton(
-                    label = "UPCOMING (${releases.count { it.releaseDateIso != "TBA" }})",
-                    active = activeTab == ActiveTab.UPCOMING,
-                    onClick = { activeTab = ActiveTab.UPCOMING }
-                )
-                BracketButton(
-                    label = "TRACKED (${trackedItems.size})",
-                    active = activeTab == ActiveTab.TRACKED,
-                    onClick = { activeTab = ActiveTab.TRACKED }
-                )
-                BracketButton(
-                    label = "DND (${dndRules.size})",
-                    active = activeTab == ActiveTab.DND,
-                    onClick = { activeTab = ActiveTab.DND }
-                )
-                BracketButton(
-                    label = "CFG",
-                    active = activeTab == ActiveTab.SETTINGS,
-                    onClick = { activeTab = ActiveTab.SETTINGS }
-                )
-            }
-
-            HorizontalDivider(color = palette.surfaceLine, thickness = 1.dp)
-            Spacer(modifier = Modifier.height(8.dp))
-
-            when (activeTab) {
-                ActiveTab.UPCOMING -> UpcomingFeedView(
-                    releases = releases,
-                    trackedSeriesMap = seriesReadMap,
-                    showTbaExpanded = showTbaExpanded,
-                    onToggleTba = { showTbaExpanded = !showTbaExpanded },
-                    onClearNewBadges = { scope.launch { repo.dao.clearNewDiscoveryFlags() } },
-                    onOpenAudible = { asin ->
-                        val intent = Intent(
-                            Intent.ACTION_VIEW,
-                            Uri.parse("https://www.audible.com/pd/$asin")
-                        )
-                        context.startActivity(intent)
-                    },
-                    onMuteBook = { rel -> scope.launch { repo.muteBook(rel.asin, rel.title) } },
-                    onMuteSeries = { rel ->
-                        scope.launch { repo.muteSeries(rel.seriesTitle, rel.seriesTitle) }
-                    },
-                    onMarkPriorRead = { trackedSeries, seq ->
-                        scope.launch { repo.dao.updateSeriesReadSequence(trackedSeries.id, seq) }
-                    }
-                )
-
-                ActiveTab.TRACKED -> TrackedEntitiesView(
-                    trackedItems = trackedItems,
-                    onAddTracked = { type, query, lastRead ->
-                        scope.launch {
-                            repo.dao.insertTrackedItem(
-                                TrackedItemEntity(
-                                    type = type,
-                                    queryValue = query.trim(),
-                                    lastReadSequence = lastRead
-                                )
-                            )
-                            isSyncing = true
-                            repo.syncCatalog()
-                            isSyncing = false
+                Surface(
+                    color = palette.background,
+                    border = BorderStroke(1.dp, palette.surfaceLine),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        // Quick Filter Strip on UPCOMING tab
+                        if (activeTab == ActiveTab.UPCOMING) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState())
+                                    .padding(horizontal = 8.dp, vertical = 2.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                MonoText(text = "FLT:", color = palette.comment, fontSizeSp = 11)
+                                QuickFilter.values().forEach { filter ->
+                                    BracketButton(
+                                        label = filter.label,
+                                        active = activeFilter == filter,
+                                        color = palette.purple,
+                                        onClick = { activeFilter = filter }
+                                    )
+                                }
+                            }
+                            HorizontalDivider(color = palette.surfaceLine, thickness = 1.dp)
                         }
-                    },
-                    onDeleteTracked = { item ->
-                        scope.launch { repo.dao.deleteTrackedItem(item) }
-                    },
-                    onUpdateSeriesSeq = { item, newSeq ->
-                        scope.launch { repo.dao.updateSeriesReadSequence(item.id, newSeq) }
-                    }
-                )
 
-                ActiveTab.DND -> DndListView(
-                    dndRules = dndRules,
-                    onRemoveRule = { rule ->
-                        scope.launch { repo.dao.deleteDndRule(rule) }
+                        // Primary Bottom Navigation Tabs (< UPCOMING | TRACKED | DND | CFG >)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            BracketButton(
+                                label = "UPCOMING (${releases.count { it.releaseDateIso != "TBA" }})",
+                                active = activeTab == ActiveTab.UPCOMING,
+                                onClick = { activeTab = ActiveTab.UPCOMING }
+                            )
+                            BracketButton(
+                                label = "TRACKED (${trackedItems.size})",
+                                active = activeTab == ActiveTab.TRACKED,
+                                onClick = { activeTab = ActiveTab.TRACKED }
+                            )
+                            BracketButton(
+                                label = "DND (${dndRules.size})",
+                                active = activeTab == ActiveTab.DND,
+                                onClick = { activeTab = ActiveTab.DND }
+                            )
+                            BracketButton(
+                                label = "CFG",
+                                active = activeTab == ActiveTab.SETTINGS,
+                                onClick = { activeTab = ActiveTab.SETTINGS }
+                            )
+                        }
                     }
-                )
-
-                ActiveTab.SETTINGS -> SettingsAndBackupView(
-                    prefs = prefs,
-                    onUpdatePrefs = { updated ->
-                        prefs = updated
-                        repo.savePrefs(updated)
-                        ReleaseCheckWorker.scheduleDailyCheck(
-                            context,
-                            updated.notifyHour,
-                            updated.notifyMinute
-                        )
-                    },
-                    onExportBackup = onExportBackup,
-                    onImportBackup = onImportBackup
-                )
+                }
             }
         }
     }
@@ -202,22 +329,44 @@ fun TrackerScreen(
 @Composable
 private fun UpcomingFeedView(
     releases: List<ReleaseEntity>,
+    quickFilter: QuickFilter,
     trackedSeriesMap: Map<String, TrackedItemEntity>,
     showTbaExpanded: Boolean,
     onToggleTba: () -> Unit,
     onClearNewBadges: () -> Unit,
-    onOpenAudible: (String) -> Unit,
+    onOpenAudibleDirect: (String) -> Unit,
+    onOpenAudibleSearch: (ReleaseEntity) -> Unit,
+    onExportCalendar: (ReleaseEntity) -> Unit,
+    onQuickTrack: (TrackType, String) -> Unit,
     onMuteBook: (ReleaseEntity) -> Unit,
     onMuteSeries: (ReleaseEntity) -> Unit,
     onMarkPriorRead: (TrackedItemEntity, Int) -> Unit
 ) {
     val palette = LocalPtsPalette.current
-    val scheduled = remember(releases) { releases.filter { it.releaseDateIso != "TBA" } }
-    val tbaList = remember(releases) { releases.filter { it.releaseDateIso == "TBA" } }
+    val today = remember { LocalDate.now() }
+
+    val filteredReleases = remember(releases, quickFilter) {
+        releases.filter { rel ->
+            when (quickFilter) {
+                QuickFilter.ALL -> true
+                QuickFilter.SERIES -> rel.matchedTags.contains("SERIES", ignoreCase = true)
+                QuickFilter.AUTHOR -> rel.matchedTags.contains("AUTHOR", ignoreCase = true)
+                QuickFilter.NARRATOR -> rel.matchedTags.contains("NARRATOR", ignoreCase = true)
+                QuickFilter.SOON_30D -> {
+                    val d = runCatching { ChronoUnit.DAYS.between(today, LocalDate.parse(rel.releaseDateIso)) }.getOrNull()
+                    d != null && d in 0..30
+                }
+            }
+        }
+    }
+
+    val scheduled = remember(filteredReleases) { filteredReleases.filter { it.releaseDateIso != "TBA" } }
+    val tbaList = remember(filteredReleases) { filteredReleases.filter { it.releaseDateIso == "TBA" } }
     val newCount = remember(releases) { releases.count { it.isNewDiscovery } }
 
     LazyColumn(
         verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = 96.dp),
         modifier = Modifier.fillMaxSize()
     ) {
         if (newCount > 0) {
@@ -251,7 +400,7 @@ private fun UpcomingFeedView(
             item {
                 AsciiBox(headerLabel = "SCOREBOARD EMPTY") {
                     MonoText(
-                        text = "No scheduled upcoming releases yet.\nTap [ TRACKED ] above to add a Series, Author, Narrator, or Book ASIN, then tap [ SYNC ].",
+                        text = "No scheduled upcoming releases match [${quickFilter.label}].\nTap [ TRACKED ] on the bottom bar to search or add a Series, Author, Narrator, or Book, then tap [ SYNC ].",
                         color = palette.comment
                     )
                 }
@@ -262,7 +411,10 @@ private fun UpcomingFeedView(
             ReleaseScorecard(
                 rel = rel,
                 trackedSeriesMap = trackedSeriesMap,
-                onOpenAudible = { onOpenAudible(rel.asin) },
+                onOpenAudibleDirect = onOpenAudibleDirect,
+                onOpenAudibleSearch = { onOpenAudibleSearch(rel) },
+                onExportCalendar = { onExportCalendar(rel) },
+                onQuickTrack = onQuickTrack,
                 onMuteBook = { onMuteBook(rel) },
                 onMuteSeries = { onMuteSeries(rel) },
                 onMarkPriorRead = onMarkPriorRead
@@ -283,7 +435,10 @@ private fun UpcomingFeedView(
                     ReleaseScorecard(
                         rel = rel,
                         trackedSeriesMap = trackedSeriesMap,
-                        onOpenAudible = { onOpenAudible(rel.asin) },
+                        onOpenAudibleDirect = onOpenAudibleDirect,
+                        onOpenAudibleSearch = { onOpenAudibleSearch(rel) },
+                        onExportCalendar = { onExportCalendar(rel) },
+                        onQuickTrack = onQuickTrack,
                         onMuteBook = { onMuteBook(rel) },
                         onMuteSeries = { onMuteSeries(rel) },
                         onMarkPriorRead = onMarkPriorRead
@@ -298,7 +453,10 @@ private fun UpcomingFeedView(
 private fun ReleaseScorecard(
     rel: ReleaseEntity,
     trackedSeriesMap: Map<String, TrackedItemEntity>,
-    onOpenAudible: () -> Unit,
+    onOpenAudibleDirect: (String) -> Unit,
+    onOpenAudibleSearch: () -> Unit,
+    onExportCalendar: () -> Unit,
+    onQuickTrack: (TrackType, String) -> Unit,
     onMuteBook: () -> Unit,
     onMuteSeries: () -> Unit,
     onMarkPriorRead: (TrackedItemEntity, Int) -> Unit
@@ -309,11 +467,20 @@ private fun ReleaseScorecard(
         runCatching { ChronoUnit.DAYS.between(today, LocalDate.parse(rel.releaseDateIso)) }.getOrNull()
     }
 
+    // Feature #3: Multi-Edition ASIN cycling (US vs. International ASINs)
+    val allAsins = remember(rel.altAsins, rel.asin) {
+        rel.altAsins.split(",").map { it.trim() }.filter { it.isNotBlank() }.ifEmpty { listOf(rel.asin) }
+    }
+    var selectedAsinIndex by remember(rel.asin) { mutableIntStateOf(0) }
+    val currentAsin = allAsins.getOrElse(selectedAsinIndex % allAsins.size) { rel.asin }
+
+    // Feature #1: Expandable Synopsis & Metadata Drawer
+    var showInfoDrawer by remember { mutableStateOf(false) }
+
     val countdownBadge = when {
         daysUntil == null -> "[ TBA ]"
         daysUntil == 0L -> "[ OUT TODAY ]"
         daysUntil < 0L -> "[ RELEASED ]"
-        daysUntil <= 7L -> "[ T-${daysUntil}d ]"
         else -> "[ T-${daysUntil}d ]"
     }
 
@@ -340,30 +507,48 @@ private fun ReleaseScorecard(
         headerColor = badgeColor
     ) {
         if (rel.isNewDiscovery) {
-            MonoText(text = "[ NEW PRE-ORDER ]", color = palette.pink, fontSizeSp = 12, bold = true)
+            MonoText(text = "[ NEW PRE-ORDER ]", color = palette.pink, fontSizeSp = 11, bold = true)
+            Spacer(modifier = Modifier.height(2.dp))
         }
 
-        MonoText(text = rel.title.uppercase(), color = palette.foreground, fontSizeSp = 15, bold = true)
-
-        if (rel.seriesTitle.isNotBlank()) {
-            val seqLabel = rel.seriesSequence?.let { " #$it" }.orEmpty()
-            MonoText(
-                text = "Series: ${rel.seriesTitle}$seqLabel",
-                color = palette.purple,
-                fontSizeSp = 13
+        // Top Row: Framed Book Cover Thumbnail + Metadata Column
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.Top
+        ) {
+            CoverThumbnail(
+                coverUrl = rel.coverUrl,
+                sizeDp = 62.dp
             )
+            Spacer(modifier = Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                MonoText(
+                    text = rel.title.uppercase(),
+                    color = palette.foreground,
+                    fontSizeSp = 14,
+                    bold = true
+                )
+                if (rel.seriesTitle.isNotBlank()) {
+                    val seqLabel = rel.seriesSequence?.let { " #$it" }.orEmpty()
+                    MonoText(
+                        text = "Series: ${rel.seriesTitle}$seqLabel",
+                        color = palette.purple,
+                        fontSizeSp = 12
+                    )
+                }
+                MonoText(text = "Author: ${rel.authors}", color = palette.yellow, fontSizeSp = 12)
+                MonoText(text = "Narrator: ${rel.narrators}", color = palette.orange, fontSizeSp = 12)
+                MonoText(
+                    text = "Match: [${rel.matchedTags.replace(",", "] [")}] • ASIN: $currentAsin",
+                    color = palette.comment,
+                    fontSizeSp = 11
+                )
+            }
         }
 
-        MonoText(text = "Author: ${rel.authors}", color = palette.yellow, fontSizeSp = 13)
-        MonoText(text = "Narrator: ${rel.narrators}", color = palette.orange, fontSizeSp = 13)
-        MonoText(
-            text = "Match: [${rel.matchedTags.replace(",", "] [")}] • ASIN: ${rel.asin}",
-            color = palette.comment,
-            fontSizeSp = 12
-        )
-
+        // Feature #5: Series Gap Detector Warning
         if (hasSeriesGap && matchedTrackedSeries != null && seq != null) {
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(6.dp))
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -372,7 +557,7 @@ private fun ReleaseScorecard(
                 MonoText(
                     text = "[ ! GAP: Book #${seq - 1} Unread (Read: #${matchedTrackedSeries.lastReadSequence}) ]",
                     color = palette.red,
-                    fontSizeSp = 12,
+                    fontSizeSp = 11,
                     bold = true
                 )
                 BracketButton(
@@ -383,32 +568,116 @@ private fun ReleaseScorecard(
             }
         }
 
+        // Feature #1: Expandable In-App Plain-Text Synopsis & Metadata Drawer
+        if (showInfoDrawer) {
+            Spacer(modifier = Modifier.height(6.dp))
+            AsciiBox(
+                headerLabel = "BOOK DETAILS & SYNOPSIS",
+                borderColor = palette.comment,
+                headerColor = palette.cyan
+            ) {
+                val hours = rel.runtimeMinutes / 60
+                val mins = rel.runtimeMinutes % 60
+                val runtimeStr = if (rel.runtimeMinutes > 0) "${hours}h ${mins}m" else "TBA"
+                val pubStr = rel.publisher.ifBlank { "TBA" }
+                MonoText(
+                    text = "Runtime: $runtimeStr  |  Publisher: $pubStr  |  Lang: ${rel.language}",
+                    color = palette.cyan,
+                    fontSizeSp = 11
+                )
+                if (allAsins.size > 1) {
+                    MonoText(
+                        text = "Grouped Edition ASINs: ${allAsins.joinToString(", ")}",
+                        color = palette.purple,
+                        fontSizeSp = 11
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                MonoText(
+                    text = rel.synopsis.ifBlank { "No publisher summary posted yet for this pre-order." },
+                    color = palette.foreground,
+                    fontSizeSp = 12
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                // Feature #4: One-tap track Series or Author directly from the card
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (rel.seriesTitle.isNotBlank()) {
+                        BracketButton(
+                            label = "+ Track Series",
+                            color = palette.purple,
+                            onClick = { onQuickTrack(TrackType.SERIES, rel.seriesTitle) }
+                        )
+                    }
+                    val firstAuthor = rel.authors.split(",").firstOrNull()?.trim().orEmpty()
+                    if (firstAuthor.isNotBlank()) {
+                        BracketButton(
+                            label = "+ Track Author",
+                            color = palette.yellow,
+                            onClick = { onQuickTrack(TrackType.AUTHOR, firstAuthor) }
+                        )
+                    }
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.height(6.dp))
         HorizontalDivider(color = palette.surfaceLine, thickness = 1.dp)
 
+        // Action Bar (Scrollable horizontally on compact screens so every control has room)
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             BracketButton(
+                label = if (showInfoDrawer) "- Info" else "+ Info",
+                color = palette.purple,
+                active = showInfoDrawer,
+                onClick = { showInfoDrawer = !showInfoDrawer }
+            )
+            // Feature #2: Region-safe [ Search App ] & [ Audible -> ]
+            BracketButton(
+                label = "Search App",
+                color = palette.green,
+                onClick = onOpenAudibleSearch
+            )
+            BracketButton(
                 label = "Audible ->",
                 color = palette.cyan,
-                onClick = onOpenAudible
+                onClick = { onOpenAudibleDirect(currentAsin) }
             )
-            Row {
+            // Feature #3: Cycle Alternate Regional ASINs if multiple exist
+            if (allAsins.size > 1) {
                 BracketButton(
-                    label = "DND Book",
-                    color = palette.red,
-                    onClick = onMuteBook
+                    label = "Alt ASIN (${(selectedAsinIndex % allAsins.size) + 1}/${allAsins.size})",
+                    color = palette.orange,
+                    onClick = { selectedAsinIndex++ }
                 )
-                if (rel.seriesTitle.isNotBlank()) {
-                    BracketButton(
-                        label = "DND Series",
-                        color = palette.red,
-                        onClick = onMuteSeries
-                    )
-                }
+            }
+            // Feature #5: One-Tap Android Calendar Export
+            if (rel.releaseDateIso != "TBA") {
+                BracketButton(
+                    label = "+ Cal",
+                    color = palette.yellow,
+                    onClick = onExportCalendar
+                )
+            }
+            BracketButton(
+                label = "DND Book",
+                color = palette.red,
+                onClick = onMuteBook
+            )
+            if (rel.seriesTitle.isNotBlank()) {
+                BracketButton(
+                    label = "DND Series",
+                    color = palette.red,
+                    onClick = onMuteSeries
+                )
             }
         }
     }
@@ -422,58 +691,47 @@ private fun TrackedEntitiesView(
     onUpdateSeriesSeq: (TrackedItemEntity, Int) -> Unit
 ) {
     val palette = LocalPtsPalette.current
+    val scope = rememberCoroutineScope()
+
     var selectedType by remember { mutableStateOf(TrackType.SERIES) }
     var inputQuery by remember { mutableStateOf("") }
     var lastReadInput by remember { mutableStateOf("0") }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        AsciiBox(headerLabel = "ADD TRACKED SOURCE") {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                TrackType.values().forEach { t ->
-                    BracketButton(
-                        label = t.name,
-                        active = selectedType == t,
-                        onClick = { selectedType = t }
-                    )
+    // Feature #4: Live Catalog Search & Preview state
+    var isSearchingCatalog by remember { mutableStateOf(false) }
+    var catalogPreviewResults by remember { mutableStateOf<List<CatalogProduct>>(emptyList()) }
+
+    LazyColumn(
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = 84.dp),
+        modifier = Modifier.fillMaxSize()
+    ) {
+        item {
+            AsciiBox(headerLabel = "ADD OR SEARCH TRACKED SOURCE") {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    TrackType.values().forEach { t ->
+                        BracketButton(
+                            label = t.name,
+                            active = selectedType == t,
+                            onClick = { selectedType = t }
+                        )
+                    }
                 }
-            }
 
-            Spacer(modifier = Modifier.height(6.dp))
-            MonoText(
-                text = if (selectedType == TrackType.BOOK) "Enter Book Title or 10-char Audible ASIN:"
-                else "Enter ${selectedType.name.lowercase().replaceFirstChar { it.uppercase() }} Name:",
-                color = palette.comment,
-                fontSizeSp = 12
-            )
-
-            BasicTextField(
-                value = inputQuery,
-                onValueChange = { inputQuery = it },
-                textStyle = TextStyle(
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 14.sp,
-                    color = palette.foreground
-                ),
-                cursorBrush = SolidColor(palette.cyan),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(palette.surfaceLine.copy(alpha = 0.35f))
-                    .padding(10.dp)
-            )
-
-            if (selectedType == TrackType.SERIES) {
                 Spacer(modifier = Modifier.height(6.dp))
                 MonoText(
-                    text = "Last Completed Book # in Series (for Gap Detector):",
+                    text = if (selectedType == TrackType.BOOK) "Enter Book Title or 10-char Audible ASIN:"
+                    else "Enter ${selectedType.name.lowercase().replaceFirstChar { it.uppercase() }} Name:",
                     color = palette.comment,
                     fontSizeSp = 12
                 )
+
                 BasicTextField(
-                    value = lastReadInput,
-                    onValueChange = { lastReadInput = it.filter { ch -> ch.isDigit() } },
+                    value = inputQuery,
+                    onValueChange = { inputQuery = it },
                     textStyle = TextStyle(
                         fontFamily = FontFamily.Monospace,
                         fontSize = 14.sp,
@@ -485,59 +743,199 @@ private fun TrackedEntitiesView(
                         .background(palette.surfaceLine.copy(alpha = 0.35f))
                         .padding(10.dp)
                 )
-            }
 
-            Spacer(modifier = Modifier.height(6.dp))
-            BracketButton(
-                label = "+ ADD TO TRACKER",
-                color = palette.green,
-                onClick = {
-                    if (inputQuery.isNotBlank()) {
-                        onAddTracked(
-                            selectedType,
-                            inputQuery,
-                            lastReadInput.toIntOrNull() ?: 0
-                        )
-                        inputQuery = ""
-                    }
+                if (selectedType == TrackType.SERIES) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    MonoText(
+                        text = "Last Completed Book # in Series (for Gap Detector):",
+                        color = palette.comment,
+                        fontSizeSp = 12
+                    )
+                    BasicTextField(
+                        value = lastReadInput,
+                        onValueChange = { lastReadInput = it.filter { ch -> ch.isDigit() } },
+                        textStyle = TextStyle(
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 14.sp,
+                            color = palette.foreground
+                        ),
+                        cursorBrush = SolidColor(palette.cyan),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(palette.surfaceLine.copy(alpha = 0.35f))
+                            .padding(10.dp)
+                    )
                 }
-            )
+
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    BracketButton(
+                        label = "+ ADD DIRECTLY",
+                        color = palette.green,
+                        onClick = {
+                            if (inputQuery.isNotBlank()) {
+                                onAddTracked(
+                                    selectedType,
+                                    inputQuery,
+                                    lastReadInput.toIntOrNull() ?: 0
+                                )
+                                inputQuery = ""
+                            }
+                        }
+                    )
+                    BracketButton(
+                        label = if (isSearchingCatalog) "SEARCHING..." else "SEARCH LIVE CATALOG",
+                        color = palette.cyan,
+                        onClick = {
+                            if (inputQuery.isNotBlank() && !isSearchingCatalog) {
+                                scope.launch {
+                                    isSearchingCatalog = true
+                                    catalogPreviewResults = AudibleApiClient.searchCatalog(
+                                        titleOrSeries = inputQuery,
+                                        numResults = 12
+                                    )
+                                    isSearchingCatalog = false
+                                }
+                            }
+                        }
+                    )
+                }
+            }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
-
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(trackedItems, key = { it.id }) { item ->
-                AsciiBox(headerLabel = item.type.name) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+        // Feature #4: Live Catalog Search Results Preview
+        if (catalogPreviewResults.isNotEmpty()) {
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    MonoText(
+                        text = "LIVE CATALOG MATCHES (${catalogPreviewResults.size})",
+                        color = palette.cyan,
+                        fontSizeSp = 12,
+                        bold = true
+                    )
+                    BracketButton(
+                        label = "CLEAR PREVIEW",
+                        color = palette.comment,
+                        onClick = { catalogPreviewResults = emptyList() }
+                    )
+                }
+            }
+            items(catalogPreviewResults, key = { "preview_${it.asin}" }) { prod ->
+                AsciiBox(
+                    headerLabel = "${prod.releaseDateIso} • ${prod.asin}",
+                    borderColor = palette.cyan,
+                    headerColor = palette.cyan
+                ) {
+                    Row(verticalAlignment = Alignment.Top) {
+                        CoverThumbnail(coverUrl = prod.coverUrl, sizeDp = 48.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
                         Column(modifier = Modifier.weight(1f)) {
-                            MonoText(text = item.queryValue, bold = true)
-                            if (item.type == TrackType.SERIES) {
+                            MonoText(text = prod.title, bold = true, fontSizeSp = 13)
+                            if (prod.seriesTitle.isNotBlank()) {
                                 MonoText(
-                                    text = "Last Read Book: #${item.lastReadSequence}",
+                                    text = "Series: ${prod.seriesTitle}",
                                     color = palette.purple,
                                     fontSizeSp = 12
                                 )
                             }
-                        }
-                        Row {
-                            if (item.type == TrackType.SERIES) {
-                                BracketButton(
-                                    label = "+1 Read",
-                                    color = palette.cyan,
-                                    onClick = { onUpdateSeriesSeq(item, item.lastReadSequence + 1) }
-                                )
-                            }
-                            BracketButton(
-                                label = "x",
-                                color = palette.red,
-                                onClick = { onDeleteTracked(item) }
+                            MonoText(
+                                text = "Author: ${prod.authors.joinToString(", ")}",
+                                color = palette.yellow,
+                                fontSizeSp = 12
+                            )
+                            MonoText(
+                                text = "Narrator: ${prod.narrators.joinToString(", ")}",
+                                color = palette.orange,
+                                fontSizeSp = 12
                             )
                         }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        if (prod.seriesTitle.isNotBlank()) {
+                            BracketButton(
+                                label = "+ Series",
+                                color = palette.purple,
+                                onClick = {
+                                    onAddTracked(
+                                        TrackType.SERIES,
+                                        prod.seriesTitle,
+                                        lastReadInput.toIntOrNull() ?: 0
+                                    )
+                                }
+                            )
+                        }
+                        prod.authors.firstOrNull()?.let { firstAuthor ->
+                            BracketButton(
+                                label = "+ Author",
+                                color = palette.yellow,
+                                onClick = { onAddTracked(TrackType.AUTHOR, firstAuthor, 0) }
+                            )
+                        }
+                        prod.narrators.firstOrNull()?.let { firstNarrator ->
+                            BracketButton(
+                                label = "+ Narrator",
+                                color = palette.orange,
+                                onClick = { onAddTracked(TrackType.NARRATOR, firstNarrator, 0) }
+                            )
+                        }
+                        BracketButton(
+                            label = "+ Book",
+                            color = palette.green,
+                            onClick = { onAddTracked(TrackType.BOOK, prod.asin, 0) }
+                        )
+                    }
+                }
+            }
+        }
+
+        items(trackedItems, key = { it.id }) { item ->
+            AsciiBox(headerLabel = item.type.name) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        MonoText(text = item.queryValue, bold = true)
+                        if (item.type == TrackType.SERIES) {
+                            MonoText(
+                                text = "Last Read Book: #${item.lastReadSequence}",
+                                color = palette.purple,
+                                fontSizeSp = 12
+                            )
+                        }
+                    }
+                    Row {
+                        if (item.type == TrackType.SERIES) {
+                            BracketButton(
+                                label = "-1",
+                                color = palette.comment,
+                                onClick = {
+                                    onUpdateSeriesSeq(item, (item.lastReadSequence - 1).coerceAtLeast(0))
+                                }
+                            )
+                            BracketButton(
+                                label = "+1 Read",
+                                color = palette.cyan,
+                                onClick = { onUpdateSeriesSeq(item, item.lastReadSequence + 1) }
+                            )
+                        }
+                        BracketButton(
+                            label = "x",
+                            color = palette.red,
+                            onClick = { onDeleteTracked(item) }
+                        )
                     }
                 }
             }
@@ -551,7 +949,11 @@ private fun DndListView(
     onRemoveRule: (DndRuleEntity) -> Unit
 ) {
     val palette = LocalPtsPalette.current
-    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    LazyColumn(
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        contentPadding = PaddingValues(bottom = 84.dp),
+        modifier = Modifier.fillMaxSize()
+    ) {
         item {
             MonoText(
                 text = "Books and Series on your Do Not Disturb list are suppressed from all future Author, Narrator, and Series syncs.",
@@ -600,98 +1002,129 @@ private fun SettingsAndBackupView(
     onImportBackup: () -> Unit
 ) {
     val palette = LocalPtsPalette.current
-    Column(
+    LazyColumn(
         verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(bottom = 84.dp),
         modifier = Modifier.fillMaxSize()
     ) {
-        AsciiBox(headerLabel = "CATALOG AUTO-FILTERS (US MARKETPLACE)") {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                MonoText("English Language Only")
-                BracketButton(
-                    label = if (prefs.englishOnly) "ON" else "OFF",
-                    active = prefs.englishOnly,
-                    onClick = { onUpdatePrefs(prefs.copy(englishOnly = !prefs.englishOnly)) }
+        // Feature #2: Audible Store / Marketplace Region Selector
+        item {
+            AsciiBox(headerLabel = "AUDIBLE STORE REGION (FOR DEEP LINKS)") {
+                MonoText(
+                    text = "Select the Audible marketplace matching your account so [ Search App ] and [ Audible -> ] open without country/region blocks:",
+                    color = palette.comment,
+                    fontSizeSp = 12
                 )
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                MonoText("Hide Abridged Editions")
-                BracketButton(
-                    label = if (prefs.hideAbridged) "ON" else "OFF",
-                    active = prefs.hideAbridged,
-                    onClick = { onUpdatePrefs(prefs.copy(hideAbridged = !prefs.hideAbridged)) }
-                )
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                MonoText("Hide Dramatized / Full-Cast")
-                BracketButton(
-                    label = if (prefs.hideDramatized) "ON" else "OFF",
-                    active = prefs.hideDramatized,
-                    onClick = { onUpdatePrefs(prefs.copy(hideDramatized = !prefs.hideDramatized)) }
-                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    AudibleMarketplace.values().forEach { mp ->
+                        BracketButton(
+                            label = mp.label,
+                            active = prefs.marketplace == mp,
+                            onClick = { onUpdatePrefs(prefs.copy(marketplaceCode = mp.code)) }
+                        )
+                    }
+                }
             }
         }
 
-        AsciiBox(headerLabel = "NOTIFICATION SCHEDULE (T-7d & T-0d)") {
-            MonoText(
-                text = "Daily Check & Alert Time: %02d:%02d Local".format(
-                    prefs.notifyHour,
-                    prefs.notifyMinute
-                ),
-                color = palette.cyan,
-                bold = true
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                BracketButton(
-                    label = "-1 Hour",
-                    onClick = {
-                        val h = (prefs.notifyHour + 23) % 24
-                        onUpdatePrefs(prefs.copy(notifyHour = h))
-                    }
-                )
-                BracketButton(
-                    label = "+1 Hour",
-                    onClick = {
-                        val h = (prefs.notifyHour + 1) % 24
-                        onUpdatePrefs(prefs.copy(notifyHour = h))
-                    }
-                )
-                BracketButton(
-                    label = "Reset 09:00",
-                    color = palette.orange,
-                    onClick = { onUpdatePrefs(prefs.copy(notifyHour = 9, notifyMinute = 0)) }
-                )
+        item {
+            AsciiBox(headerLabel = "CATALOG AUTO-FILTERS") {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    MonoText("English Language Only")
+                    BracketButton(
+                        label = if (prefs.englishOnly) "ON" else "OFF",
+                        active = prefs.englishOnly,
+                        onClick = { onUpdatePrefs(prefs.copy(englishOnly = !prefs.englishOnly)) }
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    MonoText("Hide Abridged Editions")
+                    BracketButton(
+                        label = if (prefs.hideAbridged) "ON" else "OFF",
+                        active = prefs.hideAbridged,
+                        onClick = { onUpdatePrefs(prefs.copy(hideAbridged = !prefs.hideAbridged)) }
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    MonoText("Hide Dramatized / Full-Cast")
+                    BracketButton(
+                        label = if (prefs.hideDramatized) "ON" else "OFF",
+                        active = prefs.hideDramatized,
+                        onClick = { onUpdatePrefs(prefs.copy(hideDramatized = !prefs.hideDramatized)) }
+                    )
+                }
             }
         }
 
-        AsciiBox(headerLabel = "PLAIN-TEXT JSON BACKUP & RESTORE") {
-            MonoText(
-                text = "Export or restore your tracked series, authors, narrators, DND rules, and preferences.",
-                color = palette.comment,
-                fontSizeSp = 12
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                BracketButton(
-                    label = "EXPORT .JSON",
-                    color = palette.green,
-                    onClick = onExportBackup
+        item {
+            AsciiBox(headerLabel = "NOTIFICATION SCHEDULE (T-7d & T-0d)") {
+                MonoText(
+                    text = "Daily Check & Alert Time: %02d:%02d Local".format(
+                        prefs.notifyHour,
+                        prefs.notifyMinute
+                    ),
+                    color = palette.cyan,
+                    bold = true
                 )
-                BracketButton(
-                    label = "IMPORT .JSON",
-                    color = palette.yellow,
-                    onClick = onImportBackup
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    BracketButton(
+                        label = "-1 Hour",
+                        onClick = {
+                            val h = (prefs.notifyHour + 23) % 24
+                            onUpdatePrefs(prefs.copy(notifyHour = h))
+                        }
+                    )
+                    BracketButton(
+                        label = "+1 Hour",
+                        onClick = {
+                            val h = (prefs.notifyHour + 1) % 24
+                            onUpdatePrefs(prefs.copy(notifyHour = h))
+                        }
+                    )
+                    BracketButton(
+                        label = "Reset 09:00",
+                        color = palette.orange,
+                        onClick = { onUpdatePrefs(prefs.copy(notifyHour = 9, notifyMinute = 0)) }
+                    )
+                }
+            }
+        }
+
+        item {
+            AsciiBox(headerLabel = "PLAIN-TEXT JSON BACKUP & RESTORE") {
+                MonoText(
+                    text = "Export or restore your tracked series, authors, narrators, DND rules, and preferences.",
+                    color = palette.comment,
+                    fontSizeSp = 12
                 )
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    BracketButton(
+                        label = "EXPORT .JSON",
+                        color = palette.green,
+                        onClick = onExportBackup
+                    )
+                    BracketButton(
+                        label = "IMPORT .JSON",
+                        color = palette.yellow,
+                        onClick = onImportBackup
+                    )
+                }
             }
         }
     }

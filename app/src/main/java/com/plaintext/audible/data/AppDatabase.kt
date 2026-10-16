@@ -2,6 +2,8 @@ package com.plaintext.audible.data
 
 import android.content.Context
 import androidx.room.*
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -39,6 +41,9 @@ interface TrackerDao {
     @Query("SELECT * FROM releases")
     suspend fun getAllReleases(): List<ReleaseEntity>
 
+    @Query("DELETE FROM releases")
+    suspend fun clearAllReleases()
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertReleases(releases: List<ReleaseEntity>)
 
@@ -57,7 +62,7 @@ interface TrackerDao {
 
 @Database(
     entities = [TrackedItemEntity::class, DndRuleEntity::class, ReleaseEntity::class],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -67,13 +72,27 @@ abstract class AppDatabase : RoomDatabase() {
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
+        private val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE releases ADD COLUMN coverUrl TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE releases ADD COLUMN synopsis TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE releases ADD COLUMN runtimeMinutes INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE releases ADD COLUMN publisher TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE releases ADD COLUMN altAsins TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
         fun get(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
                     "plaintext_audible.db"
-                ).build().also { INSTANCE = it }
+                )
+                    .addMigrations(MIGRATION_1_2)
+                    .fallbackToDestructiveMigration()
+                    .build()
+                    .also { INSTANCE = it }
             }
         }
     }

@@ -10,6 +10,7 @@ import androidx.core.app.NotificationCompat
 import androidx.work.*
 import com.plaintext.audible.data.ReleaseEntity
 import com.plaintext.audible.data.ReleaseRepository
+import java.net.URLEncoder
 import java.time.Duration
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -24,6 +25,7 @@ class ReleaseCheckWorker(
     override suspend fun doWork(): Result {
         val repo = ReleaseRepository(applicationContext)
         val releases = repo.syncCatalog()
+        val domain = repo.getPrefs().marketplace.domain
         val today = LocalDate.now()
 
         ensureChannel()
@@ -33,10 +35,10 @@ class ReleaseCheckWorker(
             val daysUntil = ChronoUnit.DAYS.between(today, relDate)
 
             if (daysUntil == 7L && !rel.notifiedSevenDay) {
-                sendReleaseNotification(rel, isReleaseDay = false)
+                sendReleaseNotification(rel, domain, isReleaseDay = false)
                 repo.dao.updateNotificationFlags(rel.asin, sevenDay = true, releaseDay = rel.notifiedReleaseDay)
             } else if (daysUntil == 0L && !rel.notifiedReleaseDay) {
-                sendReleaseNotification(rel, isReleaseDay = true)
+                sendReleaseNotification(rel, domain, isReleaseDay = true)
                 repo.dao.updateNotificationFlags(rel.asin, sevenDay = rel.notifiedSevenDay, releaseDay = true)
             }
         }
@@ -55,7 +57,7 @@ class ReleaseCheckWorker(
         nm.createNotificationChannel(channel)
     }
 
-    private fun sendReleaseNotification(rel: ReleaseEntity, isReleaseDay: Boolean) {
+    private fun sendReleaseNotification(rel: ReleaseEntity, domain: String, isReleaseDay: Boolean) {
         val nm = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val notifId = rel.asin.hashCode()
 
@@ -64,7 +66,9 @@ class ReleaseCheckWorker(
         val seriesPart = if (rel.seriesTitle.isNotBlank()) " (${rel.seriesTitle})" else ""
         val body = "By ${rel.authors} • Narrated by ${rel.narrators}$seriesPart"
 
-        val audibleIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.audible.com/pd/${rel.asin}"))
+        val query = URLEncoder.encode("${rel.title} ${rel.authors.split(",").firstOrNull().orEmpty()}", "UTF-8")
+        val searchUrl = "https://www.$domain/search?keywords=$query&ipRedirectOverride=true&overrideBaseCountry=true"
+        val audibleIntent = Intent(Intent.ACTION_VIEW, Uri.parse(searchUrl))
         val contentPending = PendingIntent.getActivity(
             applicationContext,
             notifId,
