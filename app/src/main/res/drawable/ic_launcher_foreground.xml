@@ -4,26 +4,21 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Left & Right Cyan ASCII Brackets [ ] (#8BE9FD) -->
     <path
         android:fillColor="#8BE9FD"
         android:pathData="M27,40 h6 v3 h-3 v22 h3 v3 h-6 z M81,40 h-6 v3 h3 v22 h-3 v3 h6 z" />
-    <!-- Dracula Purple Headphones Arch & Earcups (#BD93F9) -->
     <path
         android:fillColor="#BD93F9"
         android:pathData="M35,54 v-6 c0,-11 8,-19 19,-19 s19,8 19,19 v6 h-4 v-6 c0,-8.5 -6.5,-15 -15,-15 s-15,6.5 -15,15 v6 z" />
     <path
         android:fillColor="#BD93F9"
         android:pathData="M34,47 h6 v13 h-6 z M68,47 h6 v13 h-6 z" />
-    <!-- Neon Green Audio Waveform Bars (#50FA7B) -->
     <path
         android:fillColor="#50FA7B"
         android:pathData="M43,52 h2.5 v14 h-2.5 z M47.5,45 h2.5 v21 h-2.5 z M58,45 h2.5 v21 h-2.5 z M62.5,52 h2.5 v14 h-2.5 z" />
-    <!-- Orange Play / Bookmark Accent (#FFB86C) -->
     <path
         android:fillColor="#FFB86C"
         android:pathData="M52.5,40 h3 v3 h-3 z M52.5,46 l4.5,3 l-4.5,3 z" />
-    <!-- Foreground Open Book Pages (#F8F8F2) -->
     <path
         android:fillColor="#F8F8F2"
         android:pathData="M38,60 h3 v10 h11.5 v-12 h3 v12 h11.5 v-10 h3 v13 h-32 z M36,75 h36 v2.5 h-36 z" />
