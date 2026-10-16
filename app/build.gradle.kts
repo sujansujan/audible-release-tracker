@@ -50,6 +50,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.2")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.2")
     implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
 
     // Room for local persistence (tracked items, cached releases, DND rules, series progress)
