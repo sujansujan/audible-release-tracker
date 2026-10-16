@@ -1,0 +1,80 @@
+package com.plaintext.audible.data
+
+import android.content.Context
+import androidx.room.*
+import kotlinx.coroutines.flow.Flow
+
+@Dao
+interface TrackerDao {
+    @Query("SELECT * FROM tracked_items ORDER BY type, queryValue ASC")
+    fun observeTrackedItems(): Flow<List<TrackedItemEntity>>
+
+    @Query("SELECT * FROM tracked_items")
+    suspend fun getAllTrackedItems(): List<TrackedItemEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertTrackedItem(item: TrackedItemEntity): Long
+
+    @Delete
+    suspend fun deleteTrackedItem(item: TrackedItemEntity)
+
+    @Query("UPDATE tracked_items SET lastReadSequence = :seq WHERE id = :id")
+    suspend fun updateSeriesReadSequence(id: Long, seq: Int)
+
+    @Query("SELECT * FROM dnd_rules ORDER BY createdAt DESC")
+    fun observeDndRules(): Flow<List<DndRuleEntity>>
+
+    @Query("SELECT * FROM dnd_rules")
+    suspend fun getAllDndRules(): List<DndRuleEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertDndRule(rule: DndRuleEntity)
+
+    @Delete
+    suspend fun deleteDndRule(rule: DndRuleEntity)
+
+    @Query("SELECT * FROM releases ORDER BY releaseDateIso ASC, title ASC")
+    fun observeReleases(): Flow<List<ReleaseEntity>>
+
+    @Query("SELECT * FROM releases")
+    suspend fun getAllReleases(): List<ReleaseEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertReleases(releases: List<ReleaseEntity>)
+
+    @Query("DELETE FROM releases WHERE asin = :asin")
+    suspend fun deleteReleaseByAsin(asin: String)
+
+    @Query("DELETE FROM releases WHERE LOWER(seriesTitle) = LOWER(:seriesKey) OR seriesAsin = :seriesKey")
+    suspend fun deleteReleasesBySeries(seriesKey: String)
+
+    @Query("UPDATE releases SET isNewDiscovery = 0 WHERE isNewDiscovery = 1")
+    suspend fun clearNewDiscoveryFlags()
+
+    @Query("UPDATE releases SET notifiedSevenDay = :sevenDay, notifiedReleaseDay = :releaseDay WHERE asin = :asin")
+    suspend fun updateNotificationFlags(asin: String, sevenDay: Boolean, releaseDay: Boolean)
+}
+
+@Database(
+    entities = [TrackedItemEntity::class, DndRuleEntity::class, ReleaseEntity::class],
+    version = 1,
+    exportSchema = false
+)
+abstract class AppDatabase : RoomDatabase() {
+    abstract fun dao(): TrackerDao
+
+    companion object {
+        @Volatile
+        private var INSTANCE: AppDatabase? = null
+
+        fun get(context: Context): AppDatabase {
+            return INSTANCE ?: synchronized(this) {
+                Room.databaseBuilder(
+                    context.applicationContext,
+                    AppDatabase::class.java,
+                    "plaintext_audible.db"
+                ).build().also { INSTANCE = it }
+            }
+        }
+    }
+}
