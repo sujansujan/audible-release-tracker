@@ -24,7 +24,8 @@ data class TrackedItemEntity(
     val queryValue: String,
     val externalId: String? = null,
     val lastReadSequence: Int = 0,
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val thumbnailUrl: String = ""
 )
 
 @Immutable

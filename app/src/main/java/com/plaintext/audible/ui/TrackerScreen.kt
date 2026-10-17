@@ -110,11 +110,6 @@ fun TrackerScreen(
     val trackedItems by repo.dao.observeTrackedItems().collectAsState(initial = emptyList())
     val dndRules by repo.dao.observeDndRules().collectAsState(initial = emptyList())
 
-    // Android Back navigation state:
-    // 1. If ABOUT page is open -> close ABOUT page.
-    // 2. Else if not on Home tab (UPCOMING) -> go to last visited tab first, then to Home tab (UPCOMING).
-    // 3. Else if on Home tab with a non-ALL filter -> reset filter to ALL.
-    // 4. Else -> BackHandler is disabled so Android exits to phone Home screen.
     var activeTab by remember { mutableStateOf(ActiveTab.UPCOMING) }
     var lastNonHomeTab by remember { mutableStateOf<ActiveTab?>(null) }
     var activeFilter by remember { mutableStateOf(QuickFilter.ALL) }
@@ -184,11 +179,11 @@ fun TrackerScreen(
         }
     }
 
-    val handleAddTracked: (TrackType, String, Int) -> Unit = remember(repo, context) {
-        { type, query, lastRead ->
+    val handleAddTracked: (TrackType, String, Int, String) -> Unit = remember(repo, context) {
+        { type, query, lastRead, initialThumb ->
             scope.launch {
                 val cleaned = query.trim()
-                val added = repo.addTrackedItemUnique(type, cleaned, lastRead)
+                val added = repo.addTrackedItemUnique(type, cleaned, lastRead, initialThumb)
                 if (added) {
                     Toast.makeText(context, "[ + Tracked ${type.name}: $cleaned ]", Toast.LENGTH_SHORT).show()
                     isSyncing = true
@@ -265,6 +260,7 @@ fun TrackerScreen(
                             trackedItems = trackedItems,
                             dndRules = dndRules,
                             quickFilter = activeFilter,
+                            alwaysShowCardActions = prefs.alwaysShowCardActions,
                             showTbaExpanded = showTbaExpanded,
                             onToggleTba = { showTbaExpanded = !showTbaExpanded },
                             onClearNewBadges = { scope.launch { repo.dao.clearNewDiscoveryFlags() } },
@@ -310,7 +306,9 @@ fun TrackerScreen(
                                     }
                                 }
                             },
-                            onQuickTrack = { type, value -> handleAddTracked(type, value, 0) },
+                            onQuickTrack = { type, value, thumbUrl ->
+                                handleAddTracked(type, value, 0, thumbUrl)
+                            },
                             onMuteBook = { card ->
                                 scope.launch { repo.muteBook(card.entity.asin, card.entity.title) }
                             },
@@ -490,6 +488,7 @@ private fun UpcomingFeedView(
     trackedItems: List<TrackedItemEntity>,
     dndRules: List<DndRuleEntity>,
     quickFilter: QuickFilter,
+    alwaysShowCardActions: Boolean,
     showTbaExpanded: Boolean,
     onToggleTba: () -> Unit,
     onClearNewBadges: () -> Unit,
@@ -497,7 +496,7 @@ private fun UpcomingFeedView(
     onOpenAudioBookBay: (ReleaseCardUiModel) -> Unit,
     onCopyRelease: (ReleaseCardUiModel) -> Unit,
     onExportCalendar: (ReleaseCardUiModel) -> Unit,
-    onQuickTrack: (TrackType, String) -> Unit,
+    onQuickTrack: (TrackType, String, String) -> Unit,
     onMuteBook: (ReleaseCardUiModel) -> Unit,
     onMuteSeries: (ReleaseCardUiModel) -> Unit,
     onUnmuteRule: (DndRuleEntity) -> Unit,
@@ -727,6 +726,7 @@ private fun UpcomingFeedView(
             ) { card ->
                 ReleaseScorecard(
                     card = card,
+                    alwaysShowCardActions = alwaysShowCardActions,
                     onOpenAudibleSearch = { onOpenAudibleSearch(card) },
                     onOpenAudioBookBay = { onOpenAudioBookBay(card) },
                     onCopyRelease = { onCopyRelease(card) },
@@ -756,6 +756,7 @@ private fun UpcomingFeedView(
                 ) { card ->
                     ReleaseScorecard(
                         card = card,
+                        alwaysShowCardActions = alwaysShowCardActions,
                         onOpenAudibleSearch = { onOpenAudibleSearch(card) },
                         onOpenAudioBookBay = { onOpenAudioBookBay(card) },
                         onCopyRelease = { onCopyRelease(card) },
@@ -771,22 +772,28 @@ private fun UpcomingFeedView(
     }
 }
 
+/**
+ * Tapping anywhere on the book box (`AsciiBox`) expands/collapses the card.
+ * By default (`alwaysShowCardActions == false`), all action buttons (`[ Audible ]`, `[ ABB ]`,
+ * `[ Copy ]`, `[ + Cal ]`, `[ DND Book ]`, `[ DND Series ]`) live inside the expanded view only.
+ */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ReleaseScorecard(
     card: ReleaseCardUiModel,
+    alwaysShowCardActions: Boolean,
     onOpenAudibleSearch: () -> Unit,
     onOpenAudioBookBay: () -> Unit,
     onCopyRelease: () -> Unit,
     onExportCalendar: () -> Unit,
-    onQuickTrack: (TrackType, String) -> Unit,
+    onQuickTrack: (TrackType, String, String) -> Unit,
     onMuteBook: () -> Unit,
     onMuteSeries: () -> Unit,
     onMarkSeriesSeqRead: (TrackedItemEntity, Int) -> Unit
 ) {
     val palette = LocalPtsPalette.current
     val rel = card.entity
-    var showInfoDrawer by remember(rel.asin) { mutableStateOf(false) }
+    var isExpanded by remember(rel.asin) { mutableStateOf(false) }
 
     val badgeColor = when (card.badgeTone) {
         0 -> palette.green
@@ -797,8 +804,13 @@ private fun ReleaseScorecard(
 
     AsciiBox(
         headerLabel = card.headerLabel,
-        borderColor = if (rel.isNewDiscovery && card.isFutureOrTba) palette.pink else palette.surfaceLine,
-        headerColor = badgeColor
+        borderColor = when {
+            isExpanded -> palette.cyan
+            rel.isNewDiscovery && card.isFutureOrTba -> palette.pink
+            else -> palette.surfaceLine
+        },
+        headerColor = badgeColor,
+        onClick = { isExpanded = !isExpanded }
     ) {
         if (rel.isNewDiscovery && card.isFutureOrTba) {
             MonoText(text = "[ NEW PRE-ORDER ]", color = palette.pink, fontSizeSp = 11, bold = true)
@@ -859,101 +871,95 @@ private fun ReleaseScorecard(
             }
         }
 
-        if (card.canMarkCurrentRead && card.matchedSeriesItem != null && rel.seriesSequence != null) {
-            Spacer(modifier = Modifier.height(4.dp))
-            BracketButton(
-                label = "✓ Mark Book #${rel.seriesSequence} Read",
-                color = palette.green,
-                onClick = { onMarkSeriesSeqRead(card.matchedSeriesItem, rel.seriesSequence) }
-            )
-        }
-
-        if (showInfoDrawer) {
+        if (isExpanded) {
+            Spacer(modifier = Modifier.height(8.dp))
+            HorizontalDivider(color = palette.surfaceLine, thickness = 1.dp)
             Spacer(modifier = Modifier.height(6.dp))
-            AsciiBox(
-                headerLabel = "BOOK DETAILS & SYNOPSIS",
-                borderColor = palette.comment,
-                headerColor = palette.cyan
+
+            MonoText(
+                text = card.detailsMetaLine,
+                color = palette.cyan,
+                fontSizeSp = 11,
+                bold = true
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            MonoText(
+                text = rel.synopsis.ifBlank { "No publisher summary posted yet for this listing." },
+                color = palette.foreground,
+                fontSizeSp = 12
+            )
+
+            Spacer(modifier = Modifier.height(6.dp))
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                MonoText(
-                    text = card.detailsMetaLine,
-                    color = palette.cyan,
-                    fontSizeSp = 11
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                MonoText(
-                    text = rel.synopsis.ifBlank { "No publisher summary posted yet for this listing." },
-                    color = palette.foreground,
-                    fontSizeSp = 12
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    if (rel.seriesTitle.isNotBlank()) {
-                        BracketButton(
-                            label = "+ Track Series",
-                            color = palette.purple,
-                            onClick = { onQuickTrack(TrackType.SERIES, rel.seriesTitle) }
-                        )
-                    }
-                    if (card.primaryAuthor.isNotBlank()) {
-                        BracketButton(
-                            label = "+ Track Author",
-                            color = palette.yellow,
-                            onClick = { onQuickTrack(TrackType.AUTHOR, card.primaryAuthor) }
-                        )
-                    }
+                if (card.canMarkCurrentRead && card.matchedSeriesItem != null && rel.seriesSequence != null) {
+                    BracketButton(
+                        label = "✓ Mark Book #${rel.seriesSequence} Read",
+                        color = palette.green,
+                        onClick = { onMarkSeriesSeqRead(card.matchedSeriesItem, rel.seriesSequence) }
+                    )
+                }
+                if (rel.seriesTitle.isNotBlank()) {
+                    BracketButton(
+                        label = "+ Track Series",
+                        color = palette.purple,
+                        onClick = { onQuickTrack(TrackType.SERIES, rel.seriesTitle, rel.coverUrl) }
+                    )
+                }
+                if (card.primaryAuthor.isNotBlank()) {
+                    BracketButton(
+                        label = "+ Track Author",
+                        color = palette.yellow,
+                        onClick = { onQuickTrack(TrackType.AUTHOR, card.primaryAuthor, rel.coverUrl) }
+                    )
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(6.dp))
-        HorizontalDivider(color = palette.surfaceLine, thickness = 1.dp)
-
-        FlowRow(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            BracketButton(
-                label = if (showInfoDrawer) "- Info" else "+ Info",
-                color = palette.purple,
-                active = showInfoDrawer,
-                onClick = { showInfoDrawer = !showInfoDrawer }
-            )
-            BracketButton(
-                label = "Audible",
-                color = palette.green,
-                onClick = onOpenAudibleSearch
-            )
-            BracketButton(
-                label = "ABB",
-                color = palette.orange,
-                onClick = onOpenAudioBookBay
-            )
-            BracketButton(
-                label = "Copy",
-                color = palette.cyan,
-                onClick = onCopyRelease
-            )
-            if (rel.releaseDateIso != "TBA") {
+        // Action buttons ([Audible] [ABB] [Copy] [+ Cal] [DND Book] [DND Series])
+        // Shown inside expanded view only by default, or always if toggled ON in SETTINGS
+        if (isExpanded || alwaysShowCardActions) {
+            Spacer(modifier = Modifier.height(6.dp))
+            HorizontalDivider(color = palette.surfaceLine, thickness = 1.dp)
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
                 BracketButton(
-                    label = "+ Cal",
-                    color = palette.yellow,
-                    onClick = onExportCalendar
+                    label = "Audible",
+                    color = palette.green,
+                    onClick = onOpenAudibleSearch
                 )
-            }
-            BracketButton(
-                label = "DND Book",
-                color = palette.red,
-                onClick = onMuteBook
-            )
-            if (rel.seriesTitle.isNotBlank()) {
                 BracketButton(
-                    label = "DND Series",
+                    label = "ABB",
+                    color = palette.orange,
+                    onClick = onOpenAudioBookBay
+                )
+                BracketButton(
+                    label = "Copy",
+                    color = palette.cyan,
+                    onClick = onCopyRelease
+                )
+                if (rel.releaseDateIso != "TBA") {
+                    BracketButton(
+                        label = "+ Cal",
+                        color = palette.yellow,
+                        onClick = onExportCalendar
+                    )
+                }
+                BracketButton(
+                    label = "DND Book",
                     color = palette.red,
-                    onClick = onMuteSeries
+                    onClick = onMuteBook
                 )
+                if (rel.seriesTitle.isNotBlank()) {
+                    BracketButton(
+                        label = "DND Series",
+                        color = palette.red,
+                        onClick = onMuteSeries
+                    )
+                }
             }
         }
     }
@@ -965,7 +971,7 @@ private fun TrackedEntitiesView(
     trackedItems: List<TrackedItemEntity>,
     releases: List<ReleaseEntity>,
     enableDirectAdd: Boolean,
-    onAddTracked: (TrackType, String, Int) -> Unit,
+    onAddTracked: (TrackType, String, Int, String) -> Unit,
     onDeleteTracked: (TrackedItemEntity) -> Unit,
     onUpdateSeriesSeq: (TrackedItemEntity, Int) -> Unit,
     onOpenAbbQuery: (String) -> Unit
@@ -1089,7 +1095,7 @@ private fun TrackedEntitiesView(
                     keyboardActions = KeyboardActions(onSearch = {
                         if (enableDirectAdd && useDirectMode) {
                             if (searchQuery.isNotBlank()) {
-                                onAddTracked(directType, searchQuery, directLastRead.toIntOrNull() ?: 0)
+                                onAddTracked(directType, searchQuery, directLastRead.toIntOrNull() ?: 0, "")
                                 searchQuery = ""
                             }
                         } else {
@@ -1147,7 +1153,8 @@ private fun TrackedEntitiesView(
                                     onAddTracked(
                                         directType,
                                         searchQuery,
-                                        directLastRead.toIntOrNull() ?: 0
+                                        directLastRead.toIntOrNull() ?: 0,
+                                        ""
                                     )
                                     searchQuery = ""
                                 }
@@ -1247,7 +1254,7 @@ private fun TrackedEntitiesView(
                                 active = seriesTracked,
                                 color = palette.purple,
                                 onClick = {
-                                    onAddTracked(TrackType.SERIES, prod.seriesTitle, 0)
+                                    onAddTracked(TrackType.SERIES, prod.seriesTitle, 0, prod.coverUrl)
                                 }
                             )
                         }
@@ -1256,7 +1263,7 @@ private fun TrackedEntitiesView(
                                 label = if (authorTracked) "✓ Author" else "+ Author",
                                 active = authorTracked,
                                 color = palette.yellow,
-                                onClick = { onAddTracked(TrackType.AUTHOR, firstAuthor, 0) }
+                                onClick = { onAddTracked(TrackType.AUTHOR, firstAuthor, 0, prod.coverUrl) }
                             )
                         }
                         if (firstNarrator.isNotBlank()) {
@@ -1264,14 +1271,14 @@ private fun TrackedEntitiesView(
                                 label = if (narratorTracked) "✓ Narrator" else "+ Narrator",
                                 active = narratorTracked,
                                 color = palette.orange,
-                                onClick = { onAddTracked(TrackType.NARRATOR, firstNarrator, 0) }
+                                onClick = { onAddTracked(TrackType.NARRATOR, firstNarrator, 0, prod.coverUrl) }
                             )
                         }
                         BracketButton(
                             label = if (bookTracked) "✓ Book" else "+ Book",
                             active = bookTracked,
                             color = palette.green,
-                            onClick = { onAddTracked(TrackType.BOOK, prod.asin, 0) }
+                            onClick = { onAddTracked(TrackType.BOOK, prod.asin, 0, prod.coverUrl) }
                         )
                         BracketButton(
                             label = "ABB",
@@ -1313,23 +1320,51 @@ private fun TrackedEntitiesView(
             contentType = { "tracked_item" }
         ) { item ->
             val upcomingBadgeCount = upcomingCountsByItemId[item.id] ?: 0
-            AsciiBox(headerLabel = "${item.type.name} • [ $upcomingBadgeCount upcoming ]") {
+            val typeAccent = when (item.type) {
+                TrackType.SERIES -> palette.purple
+                TrackType.AUTHOR -> palette.yellow
+                TrackType.NARRATOR -> palette.orange
+                TrackType.BOOK -> palette.green
+            }
+            val fallbackBadge = when (item.type) {
+                TrackType.SERIES -> "[SER]"
+                TrackType.AUTHOR -> "[AUT]"
+                TrackType.NARRATOR -> "[NAR]"
+                TrackType.BOOK -> "[BOK]"
+            }
+
+            AsciiBox(
+                headerLabel = "${item.type.name} • [ $upcomingBadgeCount upcoming ]",
+                headerColor = typeAccent
+            ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        MonoText(text = item.queryValue, bold = true)
-                        if (item.type == TrackType.SERIES) {
-                            MonoText(
-                                text = "Last Read Book: #${item.lastReadSequence}",
-                                color = palette.purple,
-                                fontSizeSp = 12
-                            )
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CoverThumbnail(
+                            coverUrl = item.thumbnailUrl,
+                            sizeDp = 52.dp,
+                            fallbackText = fallbackBadge,
+                            borderColor = typeAccent
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            MonoText(text = item.queryValue, bold = true)
+                            if (item.type == TrackType.SERIES) {
+                                MonoText(
+                                    text = "Last Read Book: #${item.lastReadSequence}",
+                                    color = palette.purple,
+                                    fontSizeSp = 12
+                                )
+                            }
                         }
                     }
-                    Row {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
                         if (item.type == TrackType.SERIES) {
                             BracketButton(
                                 label = "-1",
@@ -1339,7 +1374,7 @@ private fun TrackedEntitiesView(
                                 }
                             )
                             BracketButton(
-                                label = "+1 Read",
+                                label = "+1",
                                 color = palette.cyan,
                                 onClick = { onUpdateSeriesSeq(item, item.lastReadSequence + 1) }
                             )
@@ -1432,6 +1467,19 @@ private fun SettingsAndBackupView(
                         label = if (prefs.enableDirectAdd) "ON" else "OFF",
                         active = prefs.enableDirectAdd,
                         onClick = { onUpdatePrefs(prefs.copy(enableDirectAdd = !prefs.enableDirectAdd)) }
+                    )
+                }
+                // Toggle to show action buttons on collapsed cards like before
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    MonoText("Always Show Card Actions")
+                    BracketButton(
+                        label = if (prefs.alwaysShowCardActions) "ON" else "OFF",
+                        active = prefs.alwaysShowCardActions,
+                        onClick = { onUpdatePrefs(prefs.copy(alwaysShowCardActions = !prefs.alwaysShowCardActions)) }
                     )
                 }
             }
@@ -1603,7 +1651,7 @@ private fun AboutPageView(onBack: () -> Unit) {
                     bold = true
                 )
                 MonoText(
-                    text = "Version 1.6.0 • Plain-Text Audiobook Release Tracker",
+                    text = "Version 1.7.0 • Plain-Text Audiobook Release Tracker",
                     color = palette.cyan,
                     fontSizeSp = 12,
                     bold = true

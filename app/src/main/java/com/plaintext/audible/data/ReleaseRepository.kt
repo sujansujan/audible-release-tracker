@@ -1,9 +1,8 @@
 package com.plaintext.audible.data
 
-import androidx.compose.runtime.Immutable
-
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.compose.runtime.Immutable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -28,6 +27,7 @@ data class FilterPrefs(
     val hideAbridged: Boolean = true,
     val hideDramatized: Boolean = false,
     val enableDirectAdd: Boolean = false,
+    val alwaysShowCardActions: Boolean = false,
     val isDarkTheme: Boolean = true,
     val notifyHour: Int = 9,
     val notifyMinute: Int = 0,
@@ -52,6 +52,7 @@ class ReleaseRepository(context: Context) {
         hideAbridged = prefs.getBoolean("hide_abridged", true),
         hideDramatized = prefs.getBoolean("hide_dramatized", false),
         enableDirectAdd = prefs.getBoolean("enable_direct_add", false),
+        alwaysShowCardActions = prefs.getBoolean("always_show_card_actions", false),
         isDarkTheme = prefs.getBoolean("dark_theme", true),
         notifyHour = prefs.getInt("notify_hour", 9),
         notifyMinute = prefs.getInt("notify_minute", 0),
@@ -64,6 +65,7 @@ class ReleaseRepository(context: Context) {
             .putBoolean("hide_abridged", newPrefs.hideAbridged)
             .putBoolean("hide_dramatized", newPrefs.hideDramatized)
             .putBoolean("enable_direct_add", newPrefs.enableDirectAdd)
+            .putBoolean("always_show_card_actions", newPrefs.alwaysShowCardActions)
             .putBoolean("dark_theme", newPrefs.isDarkTheme)
             .putInt("notify_hour", newPrefs.notifyHour)
             .putInt("notify_minute", newPrefs.notifyMinute)
@@ -74,7 +76,8 @@ class ReleaseRepository(context: Context) {
     suspend fun addTrackedItemUnique(
         type: TrackType,
         rawQuery: String,
-        lastReadSequence: Int = 0
+        lastReadSequence: Int = 0,
+        initialThumbnailUrl: String = ""
     ): Boolean {
         val cleaned = rawQuery.trim()
         if (cleaned.isBlank()) return false
@@ -84,14 +87,25 @@ class ReleaseRepository(context: Context) {
             if (type == TrackType.SERIES && lastReadSequence > existing.lastReadSequence) {
                 dao.updateSeriesReadSequence(existing.id, lastReadSequence)
             }
+            if (existing.thumbnailUrl.isBlank() && initialThumbnailUrl.isNotBlank()) {
+                dao.updateTrackedItemThumbnail(existing.id, initialThumbnailUrl)
+            }
             return false
+        }
+
+        // For Authors and Narrators, try fetching a portrait first so they have a distinct thumbnail
+        val resolvedThumb = if (type == TrackType.AUTHOR || type == TrackType.NARRATOR) {
+            AudibleApiClient.fetchPersonPortraitUrl(cleaned) ?: initialThumbnailUrl
+        } else {
+            initialThumbnailUrl
         }
 
         dao.insertTrackedItem(
             TrackedItemEntity(
                 type = type,
                 queryValue = cleaned,
-                lastReadSequence = lastReadSequence
+                lastReadSequence = lastReadSequence,
+                thumbnailUrl = resolvedThumb
             )
         )
         return true
@@ -145,6 +159,27 @@ class ReleaseRepository(context: Context) {
                     item to results
                 }
             }.awaitAll()
+        }
+
+        // Assign a distinct thumbnail for every tracked Author, Series, Book, and Narrator
+        val assignedThumbnails = tracked.mapNotNull { it.thumbnailUrl.takeIf { u -> u.isNotBlank() } }.toMutableSet()
+        for ((item, results) in fetchedPairs) {
+            if (item.thumbnailUrl.isBlank()) {
+                var candidateThumb = ""
+                if (item.type == TrackType.AUTHOR || item.type == TrackType.NARRATOR) {
+                    candidateThumb = AudibleApiClient.fetchPersonPortraitUrl(item.queryValue).orEmpty()
+                }
+                if (candidateThumb.isBlank()) {
+                    val availableCovers = results.mapNotNull { it.coverUrl.takeIf { u -> u.isNotBlank() } }
+                    // Pick a cover not yet used by another tracked item so each entity gets its own thumbnail
+                    candidateThumb = availableCovers.firstOrNull { it !in assignedThumbnails }
+                        ?: availableCovers.getOrElse(item.type.ordinal % availableCovers.size.coerceAtLeast(1)) { "" }
+                }
+                if (candidateThumb.isNotBlank()) {
+                    assignedThumbnails.add(candidateThumb)
+                    dao.updateTrackedItemThumbnail(item.id, candidateThumb)
+                }
+            }
         }
 
         val groupedEditions = linkedMapOf<String, EditionGroup>()

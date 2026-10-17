@@ -8,12 +8,13 @@ object BackupManager {
         val root = JSONObject()
         val prefs = repo.getPrefs()
 
-        root.put("version", 4)
+        root.put("version", 5)
         root.put("prefs", JSONObject().apply {
             put("englishOnly", prefs.englishOnly)
             put("hideAbridged", prefs.hideAbridged)
             put("hideDramatized", prefs.hideDramatized)
             put("enableDirectAdd", prefs.enableDirectAdd)
+            put("alwaysShowCardActions", prefs.alwaysShowCardActions)
             put("isDarkTheme", prefs.isDarkTheme)
             put("notifyHour", prefs.notifyHour)
             put("notifyMinute", prefs.notifyMinute)
@@ -27,6 +28,7 @@ object BackupManager {
                 put("queryValue", t.queryValue)
                 put("externalId", t.externalId ?: "")
                 put("lastReadSequence", t.lastReadSequence)
+                put("thumbnailUrl", t.thumbnailUrl)
             })
         }
         root.put("trackedItems", trackedArr)
@@ -53,6 +55,7 @@ object BackupManager {
                     hideAbridged = p.optBoolean("hideAbridged", true),
                     hideDramatized = p.optBoolean("hideDramatized", false),
                     enableDirectAdd = p.optBoolean("enableDirectAdd", false),
+                    alwaysShowCardActions = p.optBoolean("alwaysShowCardActions", false),
                     isDarkTheme = p.optBoolean("isDarkTheme", true),
                     notifyHour = p.optInt("notifyHour", 9),
                     notifyMinute = p.optInt("notifyMinute", 0),
@@ -67,7 +70,8 @@ object BackupManager {
                 repo.addTrackedItemUnique(
                     type = TrackType.valueOf(o.getString("type")),
                     rawQuery = o.getString("queryValue"),
-                    lastReadSequence = o.optInt("lastReadSequence", 0)
+                    lastReadSequence = o.optInt("lastReadSequence", 0),
+                    initialThumbnailUrl = o.optString("thumbnailUrl", "")
                 )
             }
         }

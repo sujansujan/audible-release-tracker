@@ -44,6 +44,8 @@ object ThumbnailCache {
 fun CoverThumbnail(
     coverUrl: String,
     sizeDp: Dp = 58.dp,
+    fallbackText: String = "[IMG]",
+    borderColor: Color = LocalPtsPalette.current.comment,
     modifier: Modifier = Modifier
 ) {
     val palette = LocalPtsPalette.current
@@ -68,6 +70,7 @@ fun CoverThumbnail(
                         val conn = (URL(coverUrl).openConnection() as HttpURLConnection).apply {
                             connectTimeout = 8_000
                             readTimeout = 8_000
+                            setRequestProperty("User-Agent", "NocturneTXT/1.7 (Android)")
                         }
                         try {
                             if (conn.responseCode in 200..299) {
@@ -107,7 +110,7 @@ fun CoverThumbnail(
         modifier = modifier
             .size(sizeDp)
             .background(palette.surfaceLine.copy(alpha = 0.35f))
-            .border(1.dp, palette.comment)
+            .border(1.dp, borderColor)
     ) {
         val bmp = imageBitmap
         if (bmp != null) {
@@ -120,10 +123,10 @@ fun CoverThumbnail(
             )
         } else {
             Text(
-                text = "[IMG]",
+                text = fallbackText,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 10.sp,
-                color = palette.comment
+                color = borderColor
             )
         }
     }
@@ -135,10 +138,16 @@ fun AsciiBox(
     headerLabel: String? = null,
     borderColor: Color = LocalPtsPalette.current.comment,
     headerColor: Color = LocalPtsPalette.current.purple,
+    onClick: (() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
     val palette = LocalPtsPalette.current
-    Column(modifier = modifier.fillMaxWidth()) {
+    val clickableModifier = if (onClick != null) {
+        modifier.fillMaxWidth().clickable(onClick = onClick)
+    } else {
+        modifier.fillMaxWidth()
+    }
+    Column(modifier = clickableModifier) {
         if (!headerLabel.isNullOrBlank()) {
             Text(
                 text = "+---[ $headerLabel ]---+",

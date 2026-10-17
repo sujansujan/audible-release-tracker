@@ -12,14 +12,12 @@ android {
         applicationId = "com.plaintext.audible"
         minSdk = 26
         targetSdk = 34
-        versionCode = 6
-        versionName = "1.6.0"
+        versionCode = 7
+        versionName = "1.7.0"
     }
 
     buildTypes {
         release {
-            // Signed with debug key so you can install app-release.apk directly over existing installs
-            // while getting full R8 + AOT/JIT smooth Compose scrolling performance
             signingConfig = signingConfigs.getByName("debug")
             isMinifyEnabled = true
             isShrinkResources = true

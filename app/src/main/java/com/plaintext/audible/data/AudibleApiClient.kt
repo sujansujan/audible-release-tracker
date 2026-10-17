@@ -1,8 +1,7 @@
 package com.plaintext.audible.data
 
-import androidx.compose.runtime.Immutable
-
 import android.util.LruCache
+import androidx.compose.runtime.Immutable
 import androidx.core.text.HtmlCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -52,9 +51,11 @@ object AudibleApiClient {
     private const val RESPONSE_GROUPS =
         "contributors,product_attrs,product_desc,product_extended_attrs,series,relationships,media"
     private const val IMAGE_SIZES = "252,500"
-    private const val DISK_CACHE_TTL_MS = 12L * 60L * 60L * 1000L // 12 hours
+    private const val DISK_CACHE_TTL_MS = 12L * 60L * 60L * 1000L
 
     private val memoryCache = object : LruCache<String, List<CatalogProduct>>(120) {}
+    private val personPortraitCache = object : LruCache<String, String>(120) {}
+
     @Volatile
     private var rootCacheDir: File? = null
     @Volatile
@@ -83,6 +84,7 @@ object AudibleApiClient {
 
     suspend fun clearAllCaches(): CacheStats = withContext(Dispatchers.IO) {
         memoryCache.evictAll()
+        personPortraitCache.evictAll()
         val base = rootCacheDir
         if (base != null) {
             listOf(File(base, "audible_catalog_json"), File(base, "covers")).forEach { folder ->
@@ -90,6 +92,30 @@ object AudibleApiClient {
             }
         }
         CacheStats(0, 0L)
+    }
+
+    /**
+     * Resolves an author or narrator portrait image via Wikipedia's REST summary API
+     * so Authors and Narrators get their own real portrait thumbnail when available.
+     */
+    suspend fun fetchPersonPortraitUrl(personName: String): String? = withContext(Dispatchers.IO) {
+        val cleaned = personName.trim()
+        if (cleaned.isBlank()) return@withContext null
+        personPortraitCache.get(cleaned.lowercase())?.let { cached ->
+            return@withContext cached.ifBlank { null }
+        }
+
+        val slug = URLEncoder.encode(cleaned.replace(" ", "_"), "UTF-8")
+        val wikiUrl = URL("https://en.wikipedia.org/api/rest_v1/page/summary/$slug")
+        val jsonStr = executeGet(wikiUrl)
+        val thumbUrl = if (jsonStr != null) {
+            runCatching {
+                JSONObject(jsonStr).optJSONObject("thumbnail")?.optString("source").orEmpty()
+            }.getOrDefault("")
+        } else ""
+
+        personPortraitCache.put(cleaned.lowercase(), thumbUrl)
+        thumbUrl.ifBlank { null }
     }
 
     suspend fun searchCatalog(
@@ -174,7 +200,7 @@ object AudibleApiClient {
             connectTimeout = 10_000
             readTimeout = 10_000
             setRequestProperty("Accept", "application/json")
-            setRequestProperty("User-Agent", "NocturneTXT/1.6 (Android)")
+            setRequestProperty("User-Agent", "NocturneTXT/1.7 (Android)")
         }
         return try {
             if (conn.responseCode in 200..299) {
