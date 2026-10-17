@@ -1,5 +1,7 @@
 package com.plaintext.audible.data
 
+import androidx.compose.runtime.Immutable
+
 import android.content.Context
 import android.content.SharedPreferences
 import kotlinx.coroutines.async
@@ -20,6 +22,7 @@ enum class AudibleMarketplace(val code: String, val domain: String, val label: S
     }
 }
 
+@Immutable
 data class FilterPrefs(
     val englishOnly: Boolean = true,
     val hideAbridged: Boolean = true,

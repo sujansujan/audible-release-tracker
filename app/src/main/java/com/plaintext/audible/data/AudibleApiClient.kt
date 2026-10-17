@@ -1,5 +1,7 @@
 package com.plaintext.audible.data
 
+import androidx.compose.runtime.Immutable
+
 import android.util.LruCache
 import androidx.core.text.HtmlCompat
 import kotlinx.coroutines.Dispatchers
@@ -10,6 +12,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 
+@Immutable
 data class CatalogProduct(
     val asin: String,
     val title: String,
@@ -28,6 +31,7 @@ data class CatalogProduct(
     val publisher: String
 )
 
+@Immutable
 data class CacheStats(
     val fileCount: Int,
     val totalBytes: Long
@@ -170,7 +174,7 @@ object AudibleApiClient {
             connectTimeout = 10_000
             readTimeout = 10_000
             setRequestProperty("Accept", "application/json")
-            setRequestProperty("User-Agent", "NocturneTXT/1.5 (Android)")
+            setRequestProperty("User-Agent", "NocturneTXT/1.6 (Android)")
         }
         return try {
             if (conn.responseCode in 200..299) {

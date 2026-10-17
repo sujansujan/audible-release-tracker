@@ -1,5 +1,6 @@
 package com.plaintext.audible.data
 
+import androidx.compose.runtime.Immutable
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -12,6 +13,7 @@ enum class DndTargetType {
     BOOK, SERIES
 }
 
+@Immutable
 @Entity(
     tableName = "tracked_items",
     indices = [Index(value = ["type", "queryValue"])]
@@ -19,20 +21,22 @@ enum class DndTargetType {
 data class TrackedItemEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val type: TrackType,
-    val queryValue: String,          // Name of Author/Narrator/Series, or ASIN for Book
-    val externalId: String? = null,  // Optional Audible Series ASIN or Book ASIN
-    val lastReadSequence: Int = 0,   // Used by Series Gap Detector
+    val queryValue: String,
+    val externalId: String? = null,
+    val lastReadSequence: Int = 0,
     val createdAt: Long = System.currentTimeMillis()
 )
 
+@Immutable
 @Entity(tableName = "dnd_rules")
 data class DndRuleEntity(
-    @PrimaryKey val targetKey: String, // ASIN for Book, or normalized Series key/ASIN
+    @PrimaryKey val targetKey: String,
     val targetType: DndTargetType,
     val displayTitle: String,
     val createdAt: Long = System.currentTimeMillis()
 )
 
+@Immutable
 @Entity(tableName = "releases")
 data class ReleaseEntity(
     @PrimaryKey val asin: String,
@@ -43,18 +47,18 @@ data class ReleaseEntity(
     val seriesTitle: String = "",
     val seriesAsin: String = "",
     val seriesSequence: Int? = null,
-    val releaseDateIso: String,      // YYYY-MM-DD or "TBA"
+    val releaseDateIso: String,
     val language: String = "English",
     val isAbridged: Boolean = false,
     val isDramatized: Boolean = false,
-    val matchedTags: String,         // e.g. "SERIES,AUTHOR,NARRATOR"
+    val matchedTags: String,
     val isNewDiscovery: Boolean = true,
     val notifiedSevenDay: Boolean = false,
     val notifiedReleaseDay: Boolean = false,
     val firstSeenEpochMs: Long = System.currentTimeMillis(),
-    val coverUrl: String = "",       // 252px/500px square cover thumbnail URL
-    val synopsis: String = "",       // Plain-text summary from product_desc
-    val runtimeMinutes: Int = 0,     // Runtime length in minutes
-    val publisher: String = "",      // Publisher name
-    val altAsins: String = ""        // Comma-separated all edition ASINs
+    val coverUrl: String = "",
+    val synopsis: String = "",
+    val runtimeMinutes: Int = 0,
+    val publisher: String = "",
+    val altAsins: String = ""
 )

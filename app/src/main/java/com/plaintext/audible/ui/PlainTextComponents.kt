@@ -1,5 +1,6 @@
 package com.plaintext.audible.ui
 
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.LruCache
 import androidx.compose.foundation.BorderStroke
@@ -14,6 +15,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -26,12 +28,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 
 object ThumbnailCache {
-    val memory = object : LruCache<String, ImageBitmap>(80) {}
+    val memory = object : LruCache<String, ImageBitmap>(200) {}
     fun clear() {
         memory.evictAll()
     }
@@ -51,40 +54,50 @@ fun CoverThumbnail(
         )
     }
 
-    LaunchedEffect(coverUrl) {
-        if (coverUrl.isBlank() || imageBitmap != null) return@LaunchedEffect
-        withContext(Dispatchers.IO) {
-            try {
-                val cacheDir = File(context.cacheDir, "covers").apply { mkdirs() }
-                val cacheFile = File(cacheDir, coverUrl.hashCode().toUInt().toString(16) + ".jpg")
+    if (coverUrl.isNotBlank() && imageBitmap == null) {
+        LaunchedEffect(coverUrl) {
+            val loaded = withContext(Dispatchers.IO) {
+                try {
+                    val cacheDir = File(context.cacheDir, "covers").apply { mkdirs() }
+                    val cacheFile = File(cacheDir, coverUrl.hashCode().toUInt().toString(16) + ".jpg")
 
-                val bytes = if (cacheFile.exists() && cacheFile.length() > 0) {
-                    cacheFile.readBytes()
-                } else {
-                    val conn = (URL(coverUrl).openConnection() as HttpURLConnection).apply {
-                        connectTimeout = 8_000
-                        readTimeout = 8_000
+                    if (cacheFile.exists() && cacheFile.length() > 0) {
+                        val bytes = cacheFile.readBytes()
+                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                    } else {
+                        val conn = (URL(coverUrl).openConnection() as HttpURLConnection).apply {
+                            connectTimeout = 8_000
+                            readTimeout = 8_000
+                        }
+                        try {
+                            if (conn.responseCode in 200..299) {
+                                val rawBytes = conn.inputStream.readBytes()
+                                val decoded = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size)
+                                if (decoded != null) {
+                                    val scaled = if (decoded.width > 160 || decoded.height > 160) {
+                                        Bitmap.createScaledBitmap(decoded, 160, 160, true)
+                                    } else {
+                                        decoded
+                                    }
+                                    runCatching {
+                                        val out = ByteArrayOutputStream()
+                                        scaled.compress(Bitmap.CompressFormat.JPEG, 85, out)
+                                        cacheFile.writeBytes(out.toByteArray())
+                                    }
+                                    scaled.asImageBitmap()
+                                } else null
+                            } else null
+                        } finally {
+                            conn.disconnect()
+                        }
                     }
-                    try {
-                        if (conn.responseCode in 200..299) {
-                            conn.inputStream.readBytes().also { data ->
-                                runCatching { cacheFile.writeBytes(data) }
-                            }
-                        } else null
-                    } finally {
-                        conn.disconnect()
-                    }
+                } catch (_: Exception) {
+                    null
                 }
-
-                if (bytes != null && bytes.isNotEmpty()) {
-                    val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
-                    if (bmp != null) {
-                        ThumbnailCache.memory.put(coverUrl, bmp)
-                        imageBitmap = bmp
-                    }
-                }
-            } catch (_: Exception) {
-                // Keep ASCII fallback on error
+            }
+            if (loaded != null) {
+                ThumbnailCache.memory.put(coverUrl, loaded)
+                imageBitmap = loaded
             }
         }
     }
@@ -100,8 +113,9 @@ fun CoverThumbnail(
         if (bmp != null) {
             Image(
                 bitmap = bmp,
-                contentDescription = "Book Cover",
+                contentDescription = null,
                 contentScale = ContentScale.Crop,
+                filterQuality = FilterQuality.Low,
                 modifier = Modifier.fillMaxSize()
             )
         } else {
@@ -164,9 +178,9 @@ fun BracketButton(
     Box(
         contentAlignment = Alignment.CenterStart,
         modifier = modifier
-            .defaultMinSize(minHeight = 40.dp)
+            .defaultMinSize(minHeight = 36.dp)
             .clickable(onClick = onClick)
-            .padding(horizontal = 4.dp, vertical = 6.dp)
+            .padding(horizontal = 4.dp, vertical = 4.dp)
     ) {
         Text(
             text = text,
