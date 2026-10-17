@@ -24,6 +24,7 @@ data class FilterPrefs(
     val englishOnly: Boolean = true,
     val hideAbridged: Boolean = true,
     val hideDramatized: Boolean = false,
+    val enableDirectAdd: Boolean = false,
     val isDarkTheme: Boolean = true,
     val notifyHour: Int = 9,
     val notifyMinute: Int = 0,
@@ -47,6 +48,7 @@ class ReleaseRepository(context: Context) {
         englishOnly = prefs.getBoolean("english_only", true),
         hideAbridged = prefs.getBoolean("hide_abridged", true),
         hideDramatized = prefs.getBoolean("hide_dramatized", false),
+        enableDirectAdd = prefs.getBoolean("enable_direct_add", false),
         isDarkTheme = prefs.getBoolean("dark_theme", true),
         notifyHour = prefs.getInt("notify_hour", 9),
         notifyMinute = prefs.getInt("notify_minute", 0),
@@ -58,6 +60,7 @@ class ReleaseRepository(context: Context) {
             .putBoolean("english_only", newPrefs.englishOnly)
             .putBoolean("hide_abridged", newPrefs.hideAbridged)
             .putBoolean("hide_dramatized", newPrefs.hideDramatized)
+            .putBoolean("enable_direct_add", newPrefs.enableDirectAdd)
             .putBoolean("dark_theme", newPrefs.isDarkTheme)
             .putInt("notify_hour", newPrefs.notifyHour)
             .putInt("notify_minute", newPrefs.notifyMinute)
@@ -65,10 +68,6 @@ class ReleaseRepository(context: Context) {
             .apply()
     }
 
-    /**
-     * Adds a tracked item only if an identical (type, case-insensitive queryValue) does not already exist.
-     * Returns true if newly inserted, or false if it was already tracked.
-     */
     suspend fun addTrackedItemUnique(
         type: TrackType,
         rawQuery: String,
@@ -101,10 +100,6 @@ class ReleaseRepository(context: Context) {
         val editionAsins: MutableSet<String> = linkedSetOf()
     )
 
-    /**
-     * Synchronizes tracked Series, Authors, Narrators, and individual Books concurrently
-     * using cached or fresh Audible catalog metadata, deduplicating clashes and DND rules.
-     */
     suspend fun syncCatalog(forceRefresh: Boolean = false): List<ReleaseEntity> {
         val tracked = dao.getAllTrackedItems()
         if (tracked.isEmpty()) {
@@ -115,14 +110,13 @@ class ReleaseRepository(context: Context) {
         val dndRules = dao.getAllDndRules()
         val existingByAsin = dao.getAllReleases().associateBy { it.asin }
         val filterPrefs = getPrefs()
-        val todayIso = LocalDate.now().toString()
+        val recentCutoffIso = LocalDate.now().minusDays(30).toString()
 
         val dndBooks = dndRules.filter { it.targetType == DndTargetType.BOOK }
             .map { it.targetKey.lowercase() }.toSet()
         val dndSeries = dndRules.filter { it.targetType == DndTargetType.SERIES }
             .map { it.targetKey.lowercase() }.toSet()
 
-        // Fetch all tracked items in parallel for fast sync
         val fetchedPairs = coroutineScope {
             tracked.map { item ->
                 async {
@@ -163,7 +157,7 @@ class ReleaseRepository(context: Context) {
 
                 if (item.type != TrackType.BOOK &&
                     prod.releaseDateIso != "TBA" &&
-                    prod.releaseDateIso < todayIso
+                    prod.releaseDateIso < recentCutoffIso
                 ) {
                     continue
                 }

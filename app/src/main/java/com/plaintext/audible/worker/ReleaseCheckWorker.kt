@@ -49,7 +49,7 @@ class ReleaseCheckWorker(
         val nm = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "Audible Release Alerts (T-7d & T-0d)",
+            "Release Alerts (T-7d & T-0d)",
             NotificationManager.IMPORTANCE_DEFAULT
         ).apply {
             description = "Notifications 1 week before and on release day for tracked audiobooks"

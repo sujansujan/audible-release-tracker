@@ -30,8 +30,11 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 
-private object ThumbnailCache {
+object ThumbnailCache {
     val memory = object : LruCache<String, ImageBitmap>(80) {}
+    fun clear() {
+        memory.evictAll()
+    }
 }
 
 @Composable

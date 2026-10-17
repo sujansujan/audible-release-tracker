@@ -28,6 +28,21 @@ data class CatalogProduct(
     val publisher: String
 )
 
+data class CacheStats(
+    val fileCount: Int,
+    val totalBytes: Long
+) {
+    val formattedSize: String
+        get() {
+            val kb = totalBytes / 1024.0
+            return if (kb >= 1024.0) {
+                "%.2f MB".format(kb / 1024.0)
+            } else {
+                "%.0f KB".format(kb.coerceAtLeast(0.0))
+            }
+        }
+}
+
 object AudibleApiClient {
     private const val BASE_URL = "https://api.audible.com/1.0/catalog/products"
     private const val RESPONSE_GROUPS =
@@ -35,13 +50,42 @@ object AudibleApiClient {
     private const val IMAGE_SIZES = "252,500"
     private const val DISK_CACHE_TTL_MS = 12L * 60L * 60L * 1000L // 12 hours
 
-    // In-memory parsed product list cache for instant UI/search response
     private val memoryCache = object : LruCache<String, List<CatalogProduct>>(120) {}
+    @Volatile
+    private var rootCacheDir: File? = null
     @Volatile
     private var diskCacheDir: File? = null
 
     fun initCache(baseCacheDir: File) {
+        rootCacheDir = baseCacheDir
         diskCacheDir = File(baseCacheDir, "audible_catalog_json").apply { mkdirs() }
+    }
+
+    suspend fun getCacheStats(): CacheStats = withContext(Dispatchers.IO) {
+        val base = rootCacheDir ?: return@withContext CacheStats(0, 0L)
+        val folders = listOf(File(base, "audible_catalog_json"), File(base, "covers"))
+        var count = 0
+        var bytes = 0L
+        for (folder in folders) {
+            folder.listFiles()?.forEach { f ->
+                if (f.isFile) {
+                    count++
+                    bytes += f.length()
+                }
+            }
+        }
+        CacheStats(count, bytes)
+    }
+
+    suspend fun clearAllCaches(): CacheStats = withContext(Dispatchers.IO) {
+        memoryCache.evictAll()
+        val base = rootCacheDir
+        if (base != null) {
+            listOf(File(base, "audible_catalog_json"), File(base, "covers")).forEach { folder ->
+                folder.listFiles()?.forEach { f -> runCatching { f.delete() } }
+            }
+        }
+        CacheStats(0, 0L)
     }
 
     suspend fun searchCatalog(
@@ -115,7 +159,6 @@ object AudibleApiClient {
         if (freshJson != null && cacheFile != null) {
             runCatching { cacheFile.writeText(freshJson, Charsets.UTF_8) }
         } else if (freshJson == null && cacheFile != null && cacheFile.exists()) {
-            // Offline fallback: use stale disk cache if network fails
             runCatching { return cacheFile.readText(Charsets.UTF_8) }
         }
         return freshJson
@@ -127,7 +170,7 @@ object AudibleApiClient {
             connectTimeout = 10_000
             readTimeout = 10_000
             setRequestProperty("Accept", "application/json")
-            setRequestProperty("User-Agent", "PlainTextAudibleTracker/1.4 (Android)")
+            setRequestProperty("User-Agent", "NocturneTXT/1.5 (Android)")
         }
         return try {
             if (conn.responseCode in 200..299) {

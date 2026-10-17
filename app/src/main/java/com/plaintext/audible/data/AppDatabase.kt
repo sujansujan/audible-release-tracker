@@ -92,7 +92,6 @@ abstract class AppDatabase : RoomDatabase() {
 
         private val MIGRATION_2_3 = object : Migration(2, 3) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                // Remove any duplicate tracked items (keep earliest row per type + case-insensitive queryValue)
                 db.execSQL(
                     "DELETE FROM tracked_items WHERE id NOT IN (" +
                         "SELECT MIN(id) FROM tracked_items GROUP BY type, LOWER(TRIM(queryValue))" +

@@ -21,7 +21,7 @@ data class TrackedItemEntity(
     val type: TrackType,
     val queryValue: String,          // Name of Author/Narrator/Series, or ASIN for Book
     val externalId: String? = null,  // Optional Audible Series ASIN or Book ASIN
-    val lastReadSequence: Int = 0,   // Used by Series Gap Detector (Feature #5)
+    val lastReadSequence: Int = 0,   // Used by Series Gap Detector
     val createdAt: Long = System.currentTimeMillis()
 )
 

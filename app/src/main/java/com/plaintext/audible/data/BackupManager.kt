@@ -8,11 +8,12 @@ object BackupManager {
         val root = JSONObject()
         val prefs = repo.getPrefs()
 
-        root.put("version", 3)
+        root.put("version", 4)
         root.put("prefs", JSONObject().apply {
             put("englishOnly", prefs.englishOnly)
             put("hideAbridged", prefs.hideAbridged)
             put("hideDramatized", prefs.hideDramatized)
+            put("enableDirectAdd", prefs.enableDirectAdd)
             put("isDarkTheme", prefs.isDarkTheme)
             put("notifyHour", prefs.notifyHour)
             put("notifyMinute", prefs.notifyMinute)
@@ -51,6 +52,7 @@ object BackupManager {
                     englishOnly = p.optBoolean("englishOnly", true),
                     hideAbridged = p.optBoolean("hideAbridged", true),
                     hideDramatized = p.optBoolean("hideDramatized", false),
+                    enableDirectAdd = p.optBoolean("enableDirectAdd", false),
                     isDarkTheme = p.optBoolean("isDarkTheme", true),
                     notifyHour = p.optInt("notifyHour", 9),
                     notifyMinute = p.optInt("notifyMinute", 0),

@@ -79,7 +79,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             TrackerScreen(
                 repo = repo,
-                onExportBackup = { exportLauncher.launch("plaintext-audible-backup.json") },
+                onExportBackup = { exportLauncher.launch("nocturnetxt-backup.json") },
                 onImportBackup = { importLauncher.launch(arrayOf("application/json", "*/*")) }
             )
         }
