@@ -77,7 +77,7 @@ interface TrackerDao {
     @Query("DELETE FROM releases WHERE LOWER(seriesTitle) = LOWER(:seriesKey) OR seriesAsin = :seriesKey")
     suspend fun deleteReleasesBySeries(seriesKey: String)
 
-    @Query("UPDATE releases SET isNewDiscovery = 0 WHERE isNewDiscovery = 1")
+    @Query("UPDATE releases SET isNewDiscovery = 0, narratorJustAnnounced = 0 WHERE isNewDiscovery = 1 OR narratorJustAnnounced = 1")
     suspend fun clearNewDiscoveryFlags()
 
     @Query("UPDATE releases SET notifiedSevenDay = :sevenDay, notifiedReleaseDay = :releaseDay WHERE asin = :asin")
@@ -86,7 +86,7 @@ interface TrackerDao {
 
 @Database(
     entities = [TrackedItemEntity::class, DndRuleEntity::class, ReleaseEntity::class],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -125,6 +125,13 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE releases ADD COLUMN previousReleaseDateIso TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE releases ADD COLUMN narratorJustAnnounced INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun get(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 Room.databaseBuilder(
@@ -132,7 +139,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "plaintext_audible.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                     .fallbackToDestructiveMigration()
                     .build()
                     .also { INSTANCE = it }

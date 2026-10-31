@@ -112,6 +112,7 @@ fun TrackerScreen(
     val scope = rememberCoroutineScope()
 
     var prefs by remember { mutableStateOf(repo.getPrefs()) }
+    var syncTelemetry by remember { mutableStateOf(repo.getSyncTelemetry()) }
     val systemDark = isSystemInDarkTheme()
     val useDarkPalette = when (prefs.themeMode) {
         ThemeMode.SYSTEM -> systemDark
@@ -191,6 +192,7 @@ fun TrackerScreen(
 
     LaunchedEffect(Unit) {
         repo.syncCatalog(forceRefresh = false)
+        syncTelemetry = repo.getSyncTelemetry()
     }
 
     val isBottomBarVisible = remember { mutableStateOf(true) }
@@ -216,6 +218,7 @@ fun TrackerScreen(
                     Toast.makeText(context, "[ + Tracked ${type.name}: $cleaned ]", Toast.LENGTH_SHORT).show()
                     isSyncing = true
                     repo.syncCatalog(forceRefresh = false)
+                    syncTelemetry = repo.getSyncTelemetry()
                     isSyncing = false
                 } else {
                     Toast.makeText(context, "[ Already Tracked: $cleaned ]", Toast.LENGTH_SHORT).show()
@@ -267,6 +270,7 @@ fun TrackerScreen(
                                     scope.launch {
                                         isSyncing = true
                                         repo.syncCatalog(forceRefresh = true)
+                                        syncTelemetry = repo.getSyncTelemetry()
                                         isSyncing = false
                                     }
                                 }
@@ -360,6 +364,7 @@ fun TrackerScreen(
                                 scope.launch {
                                     repo.dao.deleteDndRule(rule)
                                     repo.syncCatalog(forceRefresh = false)
+                                    syncTelemetry = repo.getSyncTelemetry()
                                 }
                             },
                             onMarkSeriesSeqRead = { trackedSeries, seq ->
@@ -387,6 +392,7 @@ fun TrackerScreen(
                                     recentlyDeletedItem = item
                                     repo.dao.deleteTrackedItem(item)
                                     repo.syncCatalog(forceRefresh = false)
+                                    syncTelemetry = repo.getSyncTelemetry()
                                 }
                             },
                             onUndoDelete = { restored ->
@@ -394,6 +400,7 @@ fun TrackerScreen(
                                     recentlyDeletedItem = null
                                     repo.dao.insertTrackedItem(restored)
                                     repo.syncCatalog(forceRefresh = false)
+                                    syncTelemetry = repo.getSyncTelemetry()
                                 }
                             },
                             onUpdateSeriesSeq = { item, newSeq ->
@@ -412,6 +419,7 @@ fun TrackerScreen(
                             } else {
                                 SettingsAndBackupView(
                                     prefs = prefs,
+                                    syncTelemetry = syncTelemetry,
                                     onUpdatePrefs = { updated ->
                                         prefs = updated
                                         repo.savePrefs(updated)
@@ -420,7 +428,10 @@ fun TrackerScreen(
                                             updated.notifyHour,
                                             updated.notifyMinute
                                         )
-                                        scope.launch { repo.syncCatalog(forceRefresh = false) }
+                                        scope.launch {
+                                            repo.syncCatalog(forceRefresh = false)
+                                            syncTelemetry = repo.getSyncTelemetry()
+                                        }
                                     },
                                     onOpenAbout = { showAboutPage = true },
                                     onExportBackup = onExportBackup,
@@ -736,7 +747,7 @@ private fun UpcomingFeedView(
             filtered.filter { it.releaseDateIso == "TBA" }.map(::toUiModel)
         }
 
-        val newlyDiscovered = releases.count { it.isNewDiscovery }
+        val newlyDiscovered = releases.count { it.isNewDiscovery || it.narratorJustAnnounced }
         Triple(groups, tbas, newlyDiscovered)
     }
 
@@ -985,6 +996,25 @@ private fun ReleaseScorecard(
             HorizontalDivider(color = palette.surfaceLine, thickness = 1.dp)
             Spacer(modifier = Modifier.height(6.dp))
 
+            if (rel.previousReleaseDateIso.isNotBlank() && rel.previousReleaseDateIso != rel.releaseDateIso) {
+                MonoText(
+                    text = "[ DATE MOVED: ${rel.previousReleaseDateIso} -> ${rel.releaseDateIso} ]",
+                    color = palette.orange,
+                    fontSizeSp = 11,
+                    bold = true
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+            }
+            if (rel.narratorJustAnnounced) {
+                MonoText(
+                    text = "[ NARRATOR ANNOUNCED: ${rel.narrators} ]",
+                    color = palette.green,
+                    fontSizeSp = 11,
+                    bold = true
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+            }
+
             MonoText(
                 text = card.detailsMetaLine,
                 color = palette.cyan,
@@ -1148,6 +1178,7 @@ private fun TrackedEntitiesView(
                 catalogResults = AudibleApiClient.searchCatalog(
                     titleOrSeries = searchQuery,
                     numResults = 15,
+                    maxPages = 1,
                     forceRefresh = false
                 )
                 isSearchingCatalog = false
@@ -1579,6 +1610,7 @@ private fun TrackedEntitiesView(
 @Composable
 private fun SettingsAndBackupView(
     prefs: FilterPrefs,
+    syncTelemetry: SyncTelemetry,
     onUpdatePrefs: (FilterPrefs) -> Unit,
     onOpenAbout: () -> Unit,
     onExportBackup: () -> Unit,
@@ -1745,7 +1777,14 @@ private fun SettingsAndBackupView(
         }
 
         item(key = "cfg_cache") {
-            AsciiBox(headerLabel = "METADATA & COVER CACHE") {
+            AsciiBox(headerLabel = "METADATA, SYNC STATUS & CACHE") {
+                MonoText(
+                    text = syncTelemetry.formattedLine,
+                    color = if (syncTelemetry.lastSyncUsedCachedFallback) palette.orange else palette.green,
+                    fontSizeSp = 12,
+                    bold = true
+                )
+                Spacer(modifier = Modifier.height(4.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -1758,7 +1797,7 @@ private fun SettingsAndBackupView(
                             bold = true
                         )
                         MonoText(
-                            text = "12h JSON catalog cache + 160px cover art cache",
+                            text = "Auto-pruned 30d / 15 MB LRU cap • Deep 3-page sync",
                             color = palette.comment,
                             fontSizeSp = 11
                         )
@@ -1853,7 +1892,7 @@ private fun AboutPageView(onBack: () -> Unit) {
                     bold = true
                 )
                 MonoText(
-                    text = "Version 2.3.0 • Plain-Text Audiobook Release Tracker",
+                    text = "Version 2.4.0 • Plain-Text Audiobook Release Tracker",
                     color = palette.cyan,
                     fontSizeSp = 12,
                     bold = true
@@ -1892,7 +1931,7 @@ private fun AboutPageView(onBack: () -> Unit) {
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 MonoText(
-                    text = "• Smart Deduplication & DND: Automatically merges multi-region clashes into a single card, blocks podcasts/periodicals, and suppresses muted books or series from future syncs and T-7d / T-0d notifications.",
+                    text = "• Smart Deduplication & Reliability: Deep paginated catalog sync, release date shift & narrator announcement detection, automatic 15 MB LRU cache pruning, and T-7d / T-0d notifications.",
                     color = palette.foreground,
                     fontSizeSp = 12
                 )

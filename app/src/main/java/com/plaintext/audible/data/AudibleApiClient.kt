@@ -12,7 +12,9 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.time.LocalDate
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.GZIPInputStream
 
 @Immutable
@@ -59,10 +61,15 @@ object AudibleApiClient {
         "contributors,product_attrs,product_desc,product_extended_attrs,series,relationships,media"
     private const val IMAGE_SIZES = "252,500"
     private const val DISK_CACHE_TTL_MS = 12L * 60L * 60L * 1000L
-    private const val CACHE_DIR_NAME = "audible_catalog_json_v19"
+    private const val PRUNE_MAX_AGE_MS = 30L * 24L * 60L * 60L * 1000L
+    private const val PRUNE_MAX_BYTES = 15L * 1024L * 1024L
+    private const val CACHE_DIR_NAME = "audible_catalog_json_v24"
 
-    private val memoryCache = object : LruCache<String, List<CatalogProduct>>(120) {}
+    private val memoryCache = object : LruCache<String, List<CatalogProduct>>(140) {}
     private val personPortraitCache = object : LruCache<String, String>(160) {}
+
+    val syncNetworkErrorCount = AtomicInteger(0)
+    val syncUsedStaleCacheCount = AtomicInteger(0)
 
     private val roleSuffixRegex = Regex(
         "(\\s*[-–—,/]\\s*(translator|translated by|editor|edited by|foreword|foreword by|afterword|introduction|adapter|adapted by|illustrator|compiler|narrator|author|contributor))+\\s*$",
@@ -85,9 +92,47 @@ object AudibleApiClient {
     fun initCache(baseCacheDir: File) {
         rootCacheDir = baseCacheDir
         diskCacheDir = File(baseCacheDir, CACHE_DIR_NAME).apply { mkdirs() }
-        // Clean up legacy v1.7/v1.8 JSON cache folder if present so fresh fields are parsed
+        // Clean up legacy JSON cache folders if present
         runCatching {
-            File(baseCacheDir, "audible_catalog_json").listFiles()?.forEach { it.delete() }
+            listOf("audible_catalog_json", "audible_catalog_json_v19").forEach { oldName ->
+                File(baseCacheDir, oldName).listFiles()?.forEach { it.delete() }
+            }
+        }
+    }
+
+    /**
+     * Automatic 30-day & 15 MB LRU Disk Cache Pruner.
+     * Evicts any cached JSON or cover file older than 30 days, and if total cache size still
+     * exceeds 15 MB, deletes the oldest files first until under the cap.
+     */
+    suspend fun pruneStaleDiskCache() = withContext(Dispatchers.IO) {
+        val base = rootCacheDir ?: return@withContext
+        val now = System.currentTimeMillis()
+        val folders = listOf(File(base, CACHE_DIR_NAME), File(base, "covers"))
+        val survivingFiles = mutableListOf<File>()
+
+        for (folder in folders) {
+            folder.listFiles()?.forEach { f ->
+                if (f.isFile) {
+                    if (now - f.lastModified() > PRUNE_MAX_AGE_MS) {
+                        runCatching { f.delete() }
+                    } else {
+                        survivingFiles += f
+                    }
+                }
+            }
+        }
+
+        var totalBytes = survivingFiles.sumOf { it.length() }
+        if (totalBytes > PRUNE_MAX_BYTES) {
+            val sortedOldestFirst = survivingFiles.sortedBy { it.lastModified() }
+            for (f in sortedOldestFirst) {
+                if (totalBytes <= PRUNE_MAX_BYTES) break
+                val len = f.length()
+                if (runCatching { f.delete() }.getOrDefault(false)) {
+                    totalBytes -= len
+                }
+            }
         }
     }
 
@@ -106,7 +151,6 @@ object AudibleApiClient {
     fun formatCanonicalName(raw: String): String {
         val cleaned = cleanContributorName(raw)
         if (cleaned.isBlank()) return raw.trim()
-        // If user typed all lowercase or mixed lowercase (e.g., "andy weir", "Brandon sanderson"), normalize to Title Case
         return cleaned.split(" ").joinToString(" ") { word ->
             if (word.isEmpty()) word
             else if (word.length <= 3 && word.all { it.isUpperCase() || it == '.' }) word
@@ -138,6 +182,7 @@ object AudibleApiClient {
             listOf(
                 File(base, CACHE_DIR_NAME),
                 File(base, "audible_catalog_json"),
+                File(base, "audible_catalog_json_v19"),
                 File(base, "covers")
             ).forEach { folder ->
                 folder.listFiles()?.forEach { f -> runCatching { f.delete() } }
@@ -165,7 +210,6 @@ object AudibleApiClient {
         val candidateAsins = linkedSetOf<String>()
         knownAuthorAsin?.trim()?.takeIf { it.isNotBlank() }?.let { candidateAsins.add(it) }
 
-        // Step 1: Query Audnexus author search by name (returns both ASIN and sometimes image directly)
         val encodedName = URLEncoder.encode(cleaned, "UTF-8")
         val audnexSearchJson = executeGetWithRetry(URL("https://api.audnex.us/authors?name=$encodedName&region=us"))
         if (audnexSearchJson != null) {
@@ -184,7 +228,6 @@ object AudibleApiClient {
             }
         }
 
-        // Step 2: Query Audible's catalog contributors array for matching author ASINs
         if (candidateAsins.isEmpty()) {
             val searchUrl = URL("$BASE_URL?author=$encodedName&num_results=10&response_groups=contributors")
             val searchJson = executeGetWithRetry(searchUrl)
@@ -212,7 +255,6 @@ object AudibleApiClient {
             }
         }
 
-        // Step 3: Scrape Audible web search if still no author ASIN found
         if (candidateAsins.isEmpty()) {
             val webSearchUrl = URL(
                 "https://www.audible.com/search?searchAuthor=$encodedName&ipRedirectOverride=true&overrideBaseCountry=true"
@@ -226,9 +268,7 @@ object AudibleApiClient {
             }
         }
 
-        // Step 4: For each candidate Author ASIN, check Audnexus Author Profile and Audible's /author/{asin} page
         for (authorAsin in candidateAsins) {
-            // 4A: Audnexus author profile endpoint
             val audnexProfileJson = executeGetWithRetry(URL("https://api.audnex.us/authors/$authorAsin?region=us"))
             if (audnexProfileJson != null) {
                 val img = runCatching {
@@ -240,7 +280,6 @@ object AudibleApiClient {
                 }
             }
 
-            // 4B: Direct scrape of Audible's public author page (https://www.audible.com/author/{authorAsin})
             val authorPageUrl = URL(
                 "https://www.audible.com/author/$authorAsin?ipRedirectOverride=true&overrideBaseCountry=true"
             )
@@ -258,13 +297,11 @@ object AudibleApiClient {
     }
 
     private fun extractAuthorImageFromAudibleHtml(html: String): String {
-        // 1. Official Amazon/Audible Author Media image URLs
         val amznAuthorMedia = Regex(
             "https://(?:m\\.media-amazon\\.com|images-na\\.ssl-images-amazon\\.com)/images/S/amzn-author-media[^\"'\\s>]*"
         ).find(html)?.value.orEmpty()
         if (amznAuthorMedia.startsWith("https://")) return amznAuthorMedia
 
-        // 2. OpenGraph meta image on the Audible author page (when not generic Audible logo)
         val ogRegex = Regex("<meta\\s+[^>]*property=[\"']og:image[\"'][^>]*content=[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
         val ogReverseRegex = Regex("<meta\\s+[^>]*content=[\"']([^\"']+)[\"'][^>]*property=[\"']og:image[\"']", RegexOption.IGNORE_CASE)
         val ogUrl = ogRegex.find(html)?.groupValues?.getOrNull(1)
@@ -272,8 +309,7 @@ object AudibleApiClient {
             ?: ""
         if (isValidAudibleAuthorPortraitUrl(ogUrl)) return ogUrl
 
-        // 3. Any image tag near author-image / Bio / Profile classes
-        val imgRegex = Regex("https://(?:m\\.media-amazon\\.com|images-na\\.ssl-images-amazon\\.com)/images/[SI]/[^\"'\\s>]+\\.(?:jpg|jpeg|png)")
+        val imgRegex = Regex("https://(?:m\\.media-amazon\\.com|images-na\\.ssl-images-amazon\\.com)/images/I/[^\"'\\s>]*_RO\\d+[^\"'\\s>]*\\.(?:jpg|jpeg|png)")
         for (match in imgRegex.findAll(html)) {
             val candidate = match.value
             if (isValidAudibleAuthorPortraitUrl(candidate)) {
@@ -301,9 +337,6 @@ object AudibleApiClient {
             lower.contains("wikimedia.org")
     }
 
-    /**
-     * Resolves a narrator portrait via Wikipedia's REST summary API when available.
-     */
     suspend fun fetchNarratorPortraitUrl(narratorName: String): String? = withContext(Dispatchers.IO) {
         val cleaned = cleanContributorName(narratorName)
         if (cleaned.isBlank()) return@withContext null
@@ -325,45 +358,72 @@ object AudibleApiClient {
         thumbUrl.ifBlank { null }
     }
 
+    /**
+     * Deep Paginated Catalog Search (up to 3 pages / 150 items when prolific sources have >= 40 results).
+     * Automatically stops paging as soon as the oldest item on the current page is older than the 30-day
+     * recent cutoff, so normal authors still only take 1 request while prolific authors never miss a book.
+     */
     suspend fun searchCatalog(
         author: String? = null,
         narrator: String? = null,
         titleOrSeries: String? = null,
         asin: String? = null,
-        numResults: Int = 45,
+        numResults: Int = 50,
+        maxPages: Int = 3,
         forceRefresh: Boolean = false
     ): List<CatalogProduct> = withContext(Dispatchers.IO) {
         if (!asin.isNullOrBlank() && asin.trim().matches(Regex("^[A-Z0-9]{10}$", RegexOption.IGNORE_CASE))) {
             return@withContext fetchByAsin(asin.trim().uppercase(Locale.US), forceRefresh)
         }
 
-        val params = mutableListOf(
+        val baseParams = mutableListOf(
             "response_groups=$RESPONSE_GROUPS",
             "image_sizes=$IMAGE_SIZES",
             "products_sort_by=-ReleaseDate",
-            "num_results=$numResults"
+            "num_results=${numResults.coerceAtMost(50)}"
         )
         author?.takeIf { it.isNotBlank() }?.let {
-            params += "author=${URLEncoder.encode(it.trim(), "UTF-8")}"
+            baseParams += "author=${URLEncoder.encode(it.trim(), "UTF-8")}"
         }
         narrator?.takeIf { it.isNotBlank() }?.let {
-            params += "narrator=${URLEncoder.encode(it.trim(), "UTF-8")}"
+            baseParams += "narrator=${URLEncoder.encode(it.trim(), "UTF-8")}"
         }
         titleOrSeries?.takeIf { it.isNotBlank() }?.let {
-            params += "keywords=${URLEncoder.encode(it.trim(), "UTF-8")}"
+            baseParams += "keywords=${URLEncoder.encode(it.trim(), "UTF-8")}"
         }
 
-        val urlStr = "$BASE_URL?${params.joinToString("&")}"
+        val combinedKey = "$BASE_URL?${baseParams.joinToString("&")}&maxPages=$maxPages"
         if (!forceRefresh) {
-            memoryCache.get(urlStr)?.let { return@withContext it }
+            memoryCache.get(combinedKey)?.let { return@withContext it }
         }
 
-        val jsonStr = fetchWithDiskCache(urlStr, forceRefresh) ?: return@withContext emptyList()
-        val parsed = parseProductsArray(JSONObject(jsonStr))
-        if (parsed.isNotEmpty()) {
-            memoryCache.put(urlStr, parsed)
+        val cutoffIso = LocalDate.now().minusDays(30).toString()
+        val accumulated = LinkedHashMap<String, CatalogProduct>()
+
+        for (page in 0 until maxPages.coerceAtLeast(1)) {
+            val pageUrlStr = "$BASE_URL?${baseParams.joinToString("&")}&page=$page"
+            val jsonStr = fetchWithDiskCache(pageUrlStr, forceRefresh) ?: break
+            val rootObj = runCatching { JSONObject(jsonStr) }.getOrNull() ?: break
+            val rawProductsArr = rootObj.optJSONArray("products") ?: break
+            val rawCount = rawProductsArr.length()
+            val parsedPage = parseProductsArray(rootObj)
+
+            for (prod in parsedPage) {
+                accumulated.putIfAbsent(prod.asin, prod)
+            }
+
+            // Stop paging if Audible returned fewer than requested items, or if we've already paged past the 30-day cutoff
+            val reachedPastCutoff = parsedPage.any { it.releaseDateIso != "TBA" && it.releaseDateIso < cutoffIso }
+            if (rawCount < numResults.coerceAtMost(50) || reachedPastCutoff) {
+                break
+            }
         }
-        parsed
+
+        val finalList = accumulated.values.toList()
+        if (finalList.isNotEmpty()) {
+            memoryCache.put(combinedKey, finalList)
+        }
+        finalList
     }
 
     private suspend fun fetchByAsin(asin: String, forceRefresh: Boolean): List<CatalogProduct> {
@@ -395,8 +455,12 @@ object AudibleApiClient {
         val freshJson = executeGetWithRetry(URL(urlStr))
         if (freshJson != null && cacheFile != null) {
             runCatching { cacheFile.writeText(freshJson, Charsets.UTF_8) }
-        } else if (freshJson == null && cacheFile != null && cacheFile.exists()) {
-            runCatching { return cacheFile.readText(Charsets.UTF_8) }
+        } else if (freshJson == null) {
+            syncNetworkErrorCount.incrementAndGet()
+            if (cacheFile != null && cacheFile.exists()) {
+                syncUsedStaleCacheCount.incrementAndGet()
+                runCatching { return cacheFile.readText(Charsets.UTF_8) }
+            }
         }
         return freshJson
     }
@@ -417,7 +481,7 @@ object AudibleApiClient {
                     if (acceptHtml) {
                         "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
                     } else {
-                        "NocturneTXT/1.9 (Android)"
+                        "NocturneTXT/2.4 (Android)"
                     }
                 )
             }
@@ -466,7 +530,6 @@ object AudibleApiClient {
         val contentDeliveryType = obj.optString("content_delivery_type", "")
         val contentType = obj.optString("content_type", "")
 
-        // Filter out podcasts, podcast episodes, periodicals, and radio shows immediately
         val combinedType = "$contentDeliveryType $contentType ${obj.optString("thesaurus_subject_keywords", "")}".lowercase(Locale.US)
         if (combinedType.contains("podcast") ||
             combinedType.contains("periodical") ||
@@ -512,7 +575,6 @@ object AudibleApiClient {
         }
 
         val finalAuthors = if (primaryAuthors.isNotEmpty()) primaryAuthors else fallbackSecondaryAuthors
-        // Skip entries with no real author (such as podcast feeds that list Unknown Author)
         if (finalAuthors.isEmpty()) {
             return null
         }

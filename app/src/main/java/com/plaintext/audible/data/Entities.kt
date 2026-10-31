@@ -61,5 +61,7 @@ data class ReleaseEntity(
     val synopsis: String = "",
     val runtimeMinutes: Int = 0,
     val publisher: String = "",
-    val altAsins: String = ""
+    val altAsins: String = "",
+    val previousReleaseDateIso: String = "",
+    val narratorJustAnnounced: Boolean = false
 )

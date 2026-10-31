@@ -8,7 +8,10 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 enum class AudibleMarketplace(val code: String, val domain: String, val label: String) {
@@ -33,6 +36,31 @@ enum class ThemeMode(val code: String, val label: String) {
         fun fromCode(code: String): ThemeMode =
             values().firstOrNull { it.code.equals(code, ignoreCase = true) } ?: SYSTEM
     }
+}
+
+@Immutable
+data class SyncTelemetry(
+    val lastSyncEpochMs: Long = 0L,
+    val lastSyncSourcesCount: Int = 0,
+    val lastSyncErrorCount: Int = 0,
+    val lastSyncUsedCachedFallback: Boolean = false
+) {
+    val formattedLine: String
+        get() {
+            if (lastSyncEpochMs <= 0L) {
+                return "Last Synced: Never"
+            }
+            val dt = Instant.ofEpochMilli(lastSyncEpochMs)
+                .atZone(ZoneId.systemDefault())
+                .toLocalDateTime()
+            val fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.US)
+            val statusPart = when {
+                lastSyncUsedCachedFallback -> "OFFLINE CACHED ($lastSyncErrorCount err)"
+                lastSyncErrorCount > 0 -> "$lastSyncErrorCount net err"
+                else -> "0 errors"
+            }
+            return "Last Synced: ${dt.format(fmt)} ($lastSyncSourcesCount sources • $statusPart)"
+        }
 }
 
 @Immutable
@@ -91,6 +119,22 @@ class ReleaseRepository(context: Context) {
             .apply()
     }
 
+    fun getSyncTelemetry(): SyncTelemetry = SyncTelemetry(
+        lastSyncEpochMs = prefs.getLong("last_sync_epoch_ms", 0L),
+        lastSyncSourcesCount = prefs.getInt("last_sync_sources_count", 0),
+        lastSyncErrorCount = prefs.getInt("last_sync_error_count", 0),
+        lastSyncUsedCachedFallback = prefs.getBoolean("last_sync_used_cached_fallback", false)
+    )
+
+    private fun saveSyncTelemetry(sourcesCount: Int, errorCount: Int, usedCachedFallback: Boolean) {
+        prefs.edit()
+            .putLong("last_sync_epoch_ms", System.currentTimeMillis())
+            .putInt("last_sync_sources_count", sourcesCount)
+            .putInt("last_sync_error_count", errorCount)
+            .putBoolean("last_sync_used_cached_fallback", usedCachedFallback)
+            .apply()
+    }
+
     suspend fun addTrackedItemUnique(
         type: TrackType,
         rawQuery: String,
@@ -116,7 +160,6 @@ class ReleaseRepository(context: Context) {
             return false
         }
 
-        // For Authors, resolve the exact official Audible author page photo first
         val resolvedThumb = when (type) {
             TrackType.AUTHOR -> {
                 AudibleApiClient.fetchAudibleAuthorImageUrl(cleaned, externalId) ?: initialThumbnailUrl
@@ -145,10 +188,6 @@ class ReleaseRepository(context: Context) {
         val editionAsins: MutableSet<String> = linkedSetOf()
     )
 
-    /**
-     * Normalizes book titles so US/UK regional variants, subtitle variants ("Book 13: A LitRPG Adventure"),
-     * and Roman numeral variants ("Book IV" vs "Book 4") collapse into a single canonical key.
-     */
     private fun normalizeTitleForGrouping(rawTitle: String): String {
         val beforeColon = rawTitle.substringBefore(":").trim().ifBlank { rawTitle }
         return beforeColon.lowercase(Locale.US)
@@ -165,13 +204,6 @@ class ReleaseRepository(context: Context) {
             .replace(Regex("[^a-z0-9]"), "")
     }
 
-    /**
-     * Scores two duplicate editions of the same book so the primary edition always keeps:
-     * 1) Real cover art (over blank/missing cover art)
-     * 2) Populated series title & sequence metadata
-     * 3) Longer/populated synopsis and runtime
-     * 4) Earliest scheduled release date (e.g., 2026-10-06 over 2026-10-15, or 2027-08-10 over 2027-08-12)
-     */
     private fun mergeDuplicateEditions(existing: CatalogProduct, candidate: CatalogProduct): CatalogProduct {
         val chosenCover = when {
             existing.coverUrl.isNotBlank() && candidate.coverUrl.isBlank() -> existing.coverUrl
@@ -213,14 +245,28 @@ class ReleaseRepository(context: Context) {
     }
 
     suspend fun syncCatalog(forceRefresh: Boolean = false): List<ReleaseEntity> {
+        // 1. Run lightweight 30-day & 15 MB LRU disk cache pruner
+        AudibleApiClient.pruneStaleDiskCache()
+        AudibleApiClient.syncNetworkErrorCount.set(0)
+        AudibleApiClient.syncUsedStaleCacheCount.set(0)
+
         val tracked = dao.getAllTrackedItems()
         if (tracked.isEmpty()) {
             dao.clearAllReleases()
+            saveSyncTelemetry(sourcesCount = 0, errorCount = 0, usedCachedFallback = false)
             return emptyList()
         }
 
         val dndRules = dao.getAllDndRules()
-        val existingByAsin = dao.getAllReleases().associateBy { it.asin }
+        val existingReleases = dao.getAllReleases()
+        val existingByAsin = existingReleases.associateBy { it.asin }
+        val existingByGroupKey = existingReleases.associateBy { rel ->
+            val normT = normalizeTitleForGrouping(rel.title)
+            val normA = rel.authors.split(",").firstOrNull()?.lowercase(Locale.US)
+                ?.replace(Regex("[^a-z0-9]"), "") ?: ""
+            "${normT}_${normA}"
+        }
+
         val filterPrefs = getPrefs()
         val todayIso = LocalDate.now().toString()
         val recentCutoffIso = LocalDate.now().minusDays(30).toString()
@@ -237,19 +283,23 @@ class ReleaseRepository(context: Context) {
                         val results = when (item.type) {
                             TrackType.AUTHOR -> AudibleApiClient.searchCatalog(
                                 author = item.queryValue,
+                                maxPages = 3,
                                 forceRefresh = forceRefresh
                             )
                             TrackType.NARRATOR -> AudibleApiClient.searchCatalog(
                                 narrator = item.queryValue,
+                                maxPages = 2,
                                 forceRefresh = forceRefresh
                             )
                             TrackType.SERIES -> AudibleApiClient.searchCatalog(
                                 titleOrSeries = item.queryValue,
+                                maxPages = 2,
                                 forceRefresh = forceRefresh
                             )
                             TrackType.BOOK -> AudibleApiClient.searchCatalog(
                                 asin = item.externalId ?: item.queryValue,
                                 titleOrSeries = item.queryValue,
+                                maxPages = 1,
                                 forceRefresh = forceRefresh
                             )
                         }
@@ -259,12 +309,10 @@ class ReleaseRepository(context: Context) {
             }.awaitAll()
         }
 
-        // Upgrade thumbnails and normalize display casing for followed items
         val assignedThumbnails = tracked.mapNotNull { it.thumbnailUrl.takeIf { u -> u.isNotBlank() } }.toMutableSet()
         val bookCoversSet = fetchedPairs.flatMap { it.second }.mapNotNull { it.coverUrl.takeIf { u -> u.isNotBlank() } }.toSet()
 
         for ((item, results) in fetchedPairs) {
-            // Canonicalize name casing (e.g., "andy weir" -> "Andy Weir", "Brandon sanderson" -> "Brandon Sanderson")
             val canonicalName = when (item.type) {
                 TrackType.AUTHOR -> {
                     results.flatMap { it.authors }
@@ -284,7 +332,6 @@ class ReleaseRepository(context: Context) {
                 TrackType.BOOK -> item.queryValue
             }
 
-            // Detect if an AUTHOR item is currently showing a book cover instead of an Audible author portrait
             val isAuthorShowingBookCover = item.type == TrackType.AUTHOR && (
                 item.thumbnailUrl.isBlank() ||
                     item.thumbnailUrl in bookCoversSet ||
@@ -326,28 +373,14 @@ class ReleaseRepository(context: Context) {
             }
         }
 
-        // Track highest already-released sequence number per series for Smart Re-Issue Guard
-        val releasedMaxSeqBySeries = mutableMapOf<String, Int>()
         val trackedSeriesLastRead = tracked.filter { it.type == TrackType.SERIES }
             .associate { it.queryValue.lowercase(Locale.US) to it.lastReadSequence }
-
-        for ((_, results) in fetchedPairs) {
-            for (prod in results) {
-                val sKey = prod.seriesTitle.trim().lowercase(Locale.US)
-                val seq = prod.seriesSequence
-                if (sKey.isNotBlank() && seq != null && prod.releaseDateIso != "TBA" && prod.releaseDateIso <= todayIso) {
-                    val prevMax = releasedMaxSeqBySeries[sKey] ?: 0
-                    if (seq > prevMax) releasedMaxSeqBySeries[sKey] = seq
-                }
-            }
-        }
 
         val groupedEditions = linkedMapOf<String, EditionGroup>()
 
         for ((item, results) in fetchedPairs) {
             val qNorm = item.queryValue.trim()
             for (prod in results) {
-                // Strict per-type relevance verification so podcasts, unrelated series, or anthology credits don't leak in
                 when (item.type) {
                     TrackType.SERIES -> {
                         val seriesMatches = prod.seriesTitle.isNotBlank() &&
@@ -383,8 +416,6 @@ class ReleaseRepository(context: Context) {
                     continue
                 }
 
-                // Smart Re-Issue Guard: if a future listing has a series sequence <= user's lastReadSequence
-                // (or <= an already-released book's sequence when it's an older installment re-issue), skip it
                 if (prod.seriesTitle.isNotBlank() && prod.seriesSequence != null && prod.releaseDateIso > todayIso) {
                     val sKey = prod.seriesTitle.trim().lowercase(Locale.US)
                     val userLastRead = trackedSeriesLastRead.entries
@@ -409,7 +440,6 @@ class ReleaseRepository(context: Context) {
                 if (prod.seriesTitle.isNotBlank() && prod.seriesTitle.lowercase(Locale.US) in dndSeries) continue
                 if (prod.seriesAsin.isNotBlank() && prod.seriesAsin.lowercase(Locale.US) in dndSeries) continue
 
-                // Deduplicate across regional release dates by grouping on normalized title + primary author
                 val normTitle = normalizeTitleForGrouping(prod.title)
                 val normAuthor = prod.authors.firstOrNull()?.lowercase(Locale.US)
                     ?.replace(Regex("[^a-z0-9]"), "") ?: ""
@@ -429,17 +459,34 @@ class ReleaseRepository(context: Context) {
             }
         }
 
-        val finalEntities = groupedEditions.values.map { group ->
+        val finalEntities = groupedEditions.entries.map { (groupKey, group) ->
             val prod = group.primaryProduct
-            val prev = existingByAsin[prod.asin]
+            val prev = existingByAsin[prod.asin] ?: existingByGroupKey[groupKey]
             val isDramatized = prod.title.contains("Dramatized", ignoreCase = true) ||
                 prod.subtitle.contains("Dramatized", ignoreCase = true)
+
+            val newNarratorsStr = prod.narrators.joinToString(", ").ifBlank { "TBA" }
+
+            // 2. Release Date Shift & Delay Detector
+            val shiftedFromDate = when {
+                prev == null -> ""
+                prev.releaseDateIso != prod.releaseDateIso && prev.releaseDateIso.isNotBlank() -> prev.releaseDateIso
+                else -> prev.previousReleaseDateIso
+            }
+
+            // 3. Narrator TBA -> Announced Detector
+            val narratorNewlyAnnounced = when {
+                prev == null -> false
+                prev.narrators.equals("TBA", ignoreCase = true) && !newNarratorsStr.equals("TBA", ignoreCase = true) -> true
+                else -> prev.narratorJustAnnounced
+            }
+
             ReleaseEntity(
                 asin = prod.asin,
                 title = prod.title,
                 subtitle = prod.subtitle,
                 authors = prod.authors.joinToString(", ").ifBlank { "Unknown Author" },
-                narrators = prod.narrators.joinToString(", ").ifBlank { "TBA" },
+                narrators = newNarratorsStr,
                 seriesTitle = prod.seriesTitle,
                 seriesAsin = prod.seriesAsin,
                 seriesSequence = prod.seriesSequence,
@@ -456,11 +503,30 @@ class ReleaseRepository(context: Context) {
                 synopsis = prod.synopsis,
                 runtimeMinutes = prod.runtimeMinutes,
                 publisher = prod.publisher,
-                altAsins = group.editionAsins.joinToString(",")
+                altAsins = group.editionAsins.joinToString(","),
+                previousReleaseDateIso = shiftedFromDate,
+                narratorJustAnnounced = narratorNewlyAnnounced
             )
         }
 
+        // If every single request failed with no cached fallback and we already had releases in DB, preserve existing DB
+        val errCount = AudibleApiClient.syncNetworkErrorCount.get()
+        val staleCount = AudibleApiClient.syncUsedStaleCacheCount.get()
+        if (finalEntities.isEmpty() && existingReleases.isNotEmpty() && errCount > 0) {
+            saveSyncTelemetry(
+                sourcesCount = tracked.size,
+                errorCount = errCount,
+                usedCachedFallback = true
+            )
+            return existingReleases
+        }
+
         dao.replaceSyncedReleases(finalEntities)
+        saveSyncTelemetry(
+            sourcesCount = tracked.size,
+            errorCount = errCount,
+            usedCachedFallback = staleCount > 0
+        )
         return dao.getAllReleases()
     }
 
