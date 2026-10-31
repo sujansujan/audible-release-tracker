@@ -1,8 +1,8 @@
-# NocturneTXT — Plain-Text Audiobook Release Tracker (v2.1)
+# NocturneTXT — Plain-Text Audiobook Release Tracker (v2.3)
 
 A lean, native Android app inspired by [Plain Text Sports](https://plaintextsports.com/) with official [Dracula and Alucard](https://draculatheme.com/spec) themes for tracking upcoming Audible releases (`api.audible.com/1.0/catalog/products`).
 
-## Key Highlights in v2.1
+## Key Highlights in v2.3
 - **Cross-Date & Regional Duplicate Merging**: Collapses multi-region and multi-date duplicate ASINs (such as US vs. UK/Commonwealth listings spaced days apart) into a single scorecard, automatically keeping the earliest release date and real cover art over missing/placeholder covers.
 - **Strict Podcast & Non-Audiobook Blocker + Series Precision**: Filters out `PodcastParent`, `PodcastEpisode`, `Periodical`, radio shows, bonus episodes, and `Unknown Author` entries, and requires followed `SERIES` items to match Audible's `series` metadata rather than unrelated podcast episode titles.
 - **Official Audible Author Page Thumbnails**: Resolves author portraits directly from Audible's author pages (`audible.com/author/{asin}`) and [Audnexus](https://audnex.us/) (`api.audnex.us/authors`), automatically replacing old cached book-cover thumbnails on sync.

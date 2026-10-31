@@ -31,6 +31,9 @@ interface TrackerDao {
     @Query("UPDATE tracked_items SET thumbnailUrl = :url WHERE id = :id")
     suspend fun updateTrackedItemThumbnail(id: Long, url: String)
 
+    @Query("UPDATE tracked_items SET queryValue = :queryValue, externalId = :extId, thumbnailUrl = :url WHERE id = :id")
+    suspend fun updateTrackedItemDetails(id: Long, queryValue: String, extId: String?, url: String)
+
     @Query("SELECT * FROM dnd_rules ORDER BY createdAt DESC")
     fun observeDndRules(): Flow<List<DndRuleEntity>>
 
@@ -57,6 +60,16 @@ interface TrackerDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertReleases(releases: List<ReleaseEntity>)
+
+    @Transaction
+    suspend fun replaceSyncedReleases(releases: List<ReleaseEntity>) {
+        if (releases.isEmpty()) {
+            clearAllReleases()
+        } else {
+            upsertReleases(releases)
+            deleteReleasesNotIn(releases.map { it.asin })
+        }
+    }
 
     @Query("DELETE FROM releases WHERE asin = :asin")
     suspend fun deleteReleaseByAsin(asin: String)

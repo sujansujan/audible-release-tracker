@@ -11,8 +11,10 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -40,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.plaintext.audible.data.*
 import com.plaintext.audible.worker.ReleaseCheckWorker
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.net.URLEncoder
 import java.time.LocalDate
@@ -69,6 +72,11 @@ enum class TrackedSourceFilter(val label: String, val trackType: TrackType?) {
     AUTHOR("AUTHOR", TrackType.AUTHOR),
     NARRATOR("NARRATOR", TrackType.NARRATOR),
     BOOK("BOOK", TrackType.BOOK)
+}
+
+enum class TrackedSortOrder(val label: String) {
+    A_TO_Z("A-Z"),
+    MOST_UPCOMING("UPCOMING")
 }
 
 @Immutable
@@ -104,7 +112,13 @@ fun TrackerScreen(
     val scope = rememberCoroutineScope()
 
     var prefs by remember { mutableStateOf(repo.getPrefs()) }
-    val palette = if (prefs.isDarkTheme) DraculaPalette else AlucardPalette
+    val systemDark = isSystemInDarkTheme()
+    val useDarkPalette = when (prefs.themeMode) {
+        ThemeMode.SYSTEM -> systemDark
+        ThemeMode.DARK -> true
+        ThemeMode.LIGHT -> false
+    }
+    val palette = if (useDarkPalette) DraculaPalette else AlucardPalette
 
     val releases by repo.dao.observeReleases().collectAsState(initial = emptyList())
     val trackedItems by repo.dao.observeTrackedItems().collectAsState(initial = emptyList())
@@ -113,9 +127,18 @@ fun TrackerScreen(
     var activeTab by remember { mutableStateOf(ActiveTab.UPCOMING) }
     var lastNonHomeTab by remember { mutableStateOf<ActiveTab?>(null) }
     var activeFilter by remember { mutableStateOf(QuickFilter.ALL) }
+    var focusedSourceQuery by remember { mutableStateOf<String?>(null) }
     var isSyncing by remember { mutableStateOf(false) }
     var showTbaExpanded by remember { mutableStateOf(false) }
     var showAboutPage by remember { mutableStateOf(false) }
+    var recentlyDeletedItem by remember { mutableStateOf<TrackedItemEntity?>(null) }
+
+    LaunchedEffect(recentlyDeletedItem) {
+        if (recentlyDeletedItem != null) {
+            delay(5000L)
+            recentlyDeletedItem = null
+        }
+    }
 
     val navigateToTab: (ActiveTab) -> Unit = { targetTab ->
         if (targetTab != activeTab) {
@@ -134,6 +157,7 @@ fun TrackerScreen(
     }
 
     val shouldInterceptBack = showAboutPage ||
+        focusedSourceQuery != null ||
         activeTab != ActiveTab.UPCOMING ||
         activeFilter != QuickFilter.ALL
 
@@ -141,6 +165,10 @@ fun TrackerScreen(
         when {
             showAboutPage -> {
                 showAboutPage = false
+            }
+            focusedSourceQuery != null -> {
+                focusedSourceQuery = null
+                activeTab = ActiveTab.TRACKED
             }
             activeTab != ActiveTab.UPCOMING -> {
                 val prev = lastNonHomeTab
@@ -179,11 +207,11 @@ fun TrackerScreen(
         }
     }
 
-    val handleAddTracked: (TrackType, String, Int, String) -> Unit = remember(repo, context) {
-        { type, query, lastRead, initialThumb ->
+    val handleAddTracked: (TrackType, String, Int, String, String?) -> Unit = remember(repo, context) {
+        { type, query, lastRead, initialThumb, externalId ->
             scope.launch {
                 val cleaned = query.trim()
-                val added = repo.addTrackedItemUnique(type, cleaned, lastRead, initialThumb)
+                val added = repo.addTrackedItemUnique(type, cleaned, lastRead, initialThumb, externalId)
                 if (added) {
                     Toast.makeText(context, "[ + Tracked ${type.name}: $cleaned ]", Toast.LENGTH_SHORT).show()
                     isSyncing = true
@@ -198,6 +226,12 @@ fun TrackerScreen(
 
     val upcomingCount = remember(releases, todayIso) {
         releases.count { it.releaseDateIso != "TBA" && it.releaseDateIso >= todayIso }
+    }
+
+    val themeButtonLabel = when (prefs.themeMode) {
+        ThemeMode.SYSTEM -> "AUTO:${palette.name}"
+        ThemeMode.DARK -> "DRACULA"
+        ThemeMode.LIGHT -> "ALUCARD"
     }
 
     CompositionLocalProvider(LocalPtsPalette provides palette) {
@@ -239,10 +273,15 @@ fun TrackerScreen(
                             }
                         )
                         BracketButton(
-                            label = palette.name,
+                            label = themeButtonLabel,
                             color = palette.orange,
                             onClick = {
-                                val updated = prefs.copy(isDarkTheme = !prefs.isDarkTheme)
+                                val nextMode = when (prefs.themeMode) {
+                                    ThemeMode.SYSTEM -> ThemeMode.DARK
+                                    ThemeMode.DARK -> ThemeMode.LIGHT
+                                    ThemeMode.LIGHT -> ThemeMode.SYSTEM
+                                }
+                                val updated = prefs.copy(themeModeCode = nextMode.code)
                                 prefs = updated
                                 repo.savePrefs(updated)
                             }
@@ -260,6 +299,8 @@ fun TrackerScreen(
                             trackedItems = trackedItems,
                             dndRules = dndRules,
                             quickFilter = activeFilter,
+                            focusedSourceQuery = focusedSourceQuery,
+                            onClearFocusedSource = { focusedSourceQuery = null },
                             alwaysShowCardActions = prefs.alwaysShowCardActions,
                             showTbaExpanded = showTbaExpanded,
                             onToggleTba = { showTbaExpanded = !showTbaExpanded },
@@ -307,7 +348,7 @@ fun TrackerScreen(
                                 }
                             },
                             onQuickTrack = { type, value, thumbUrl ->
-                                handleAddTracked(type, value, 0, thumbUrl)
+                                handleAddTracked(type, value, 0, thumbUrl, null)
                             },
                             onMuteBook = { card ->
                                 scope.launch { repo.muteBook(card.entity.asin, card.entity.title) }
@@ -333,10 +374,25 @@ fun TrackerScreen(
                             trackedItems = trackedItems,
                             releases = releases,
                             enableDirectAdd = prefs.enableDirectAdd,
+                            recentlyDeletedItem = recentlyDeletedItem,
                             onAddTracked = handleAddTracked,
+                            onSelectSourceForFilter = { item ->
+                                focusedSourceQuery = item.queryValue
+                                activeFilter = QuickFilter.ALL
+                                lastNonHomeTab = ActiveTab.TRACKED
+                                activeTab = ActiveTab.UPCOMING
+                            },
                             onDeleteTracked = { item ->
                                 scope.launch {
+                                    recentlyDeletedItem = item
                                     repo.dao.deleteTrackedItem(item)
+                                    repo.syncCatalog(forceRefresh = false)
+                                }
+                            },
+                            onUndoDelete = { restored ->
+                                scope.launch {
+                                    recentlyDeletedItem = null
+                                    repo.dao.insertTrackedItem(restored)
                                     repo.syncCatalog(forceRefresh = false)
                                 }
                             },
@@ -383,7 +439,10 @@ fun TrackerScreen(
                 upcomingCount = upcomingCount,
                 trackedCount = trackedItems.size,
                 dndCount = dndRules.size,
-                onSelectFilter = { activeFilter = it },
+                onSelectFilter = {
+                    focusedSourceQuery = null
+                    activeFilter = it
+                },
                 onSelectTab = navigateToTab,
                 modifier = Modifier.align(Alignment.BottomCenter)
             )
@@ -482,12 +541,15 @@ private fun BottomThumbBar(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun UpcomingFeedView(
     releases: List<ReleaseEntity>,
     trackedItems: List<TrackedItemEntity>,
     dndRules: List<DndRuleEntity>,
     quickFilter: QuickFilter,
+    focusedSourceQuery: String?,
+    onClearFocusedSource: () -> Unit,
     alwaysShowCardActions: Boolean,
     showTbaExpanded: Boolean,
     onToggleTba: () -> Unit,
@@ -559,7 +621,13 @@ private fun UpcomingFeedView(
 
     val monthFormatter = remember { DateTimeFormatter.ofPattern("MMMM yyyy", Locale.US) }
 
-    val (monthGroups, tbaCards, newCount) = remember(releases, trackedItems, quickFilter, todayIso) {
+    val (monthGroups, tbaCards, newCount) = remember(
+        releases,
+        trackedItems,
+        quickFilter,
+        focusedSourceQuery,
+        todayIso
+    ) {
         val seriesList = trackedItems.filter { it.type == TrackType.SERIES }
 
         fun toUiModel(rel: ReleaseEntity): ReleaseCardUiModel {
@@ -614,6 +682,16 @@ private fun UpcomingFeedView(
         }
 
         val filtered = releases.filter { rel ->
+            val focus = focusedSourceQuery?.trim()
+            if (!focus.isNullOrBlank()) {
+                val matchesFocus = rel.seriesTitle.contains(focus, ignoreCase = true) ||
+                    rel.authors.contains(focus, ignoreCase = true) ||
+                    rel.narrators.contains(focus, ignoreCase = true) ||
+                    rel.title.contains(focus, ignoreCase = true) ||
+                    rel.asin.equals(focus, ignoreCase = true)
+                if (!matchesFocus) return@filter false
+            }
+
             val isPastRelease = rel.releaseDateIso != "TBA" && rel.releaseDateIso < todayIso
             when (quickFilter) {
                 QuickFilter.RECENT_30D -> isPastRelease
@@ -667,7 +745,35 @@ private fun UpcomingFeedView(
         contentPadding = PaddingValues(bottom = 96.dp),
         modifier = Modifier.fillMaxSize()
     ) {
-        if (newCount > 0 && quickFilter != QuickFilter.RECENT_30D) {
+        if (!focusedSourceQuery.isNullOrBlank()) {
+            item(key = "focused_source_banner", contentType = "banner") {
+                AsciiBox(
+                    headerLabel = "FILTERED BY FOLLOWED SOURCE",
+                    borderColor = palette.cyan,
+                    headerColor = palette.cyan
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        MonoText(
+                            text = "Showing releases for: $focusedSourceQuery",
+                            color = palette.cyan,
+                            bold = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                        BracketButton(
+                            label = "SHOW ALL",
+                            color = palette.green,
+                            onClick = onClearFocusedSource
+                        )
+                    }
+                }
+            }
+        }
+
+        if (newCount > 0 && quickFilter != QuickFilter.RECENT_30D && focusedSourceQuery.isNullOrBlank()) {
             item(key = "new_discovery_banner", contentType = "banner") {
                 AsciiBox(
                     headerLabel = "NEW PRE-ORDER DISCOVERED",
@@ -698,7 +804,9 @@ private fun UpcomingFeedView(
             item(key = "empty_scoreboard", contentType = "empty") {
                 AsciiBox(headerLabel = "SCOREBOARD EMPTY") {
                     MonoText(
-                        text = if (quickFilter == QuickFilter.RECENT_30D) {
+                        text = if (!focusedSourceQuery.isNullOrBlank()) {
+                            "No scheduled upcoming releases found for '$focusedSourceQuery'."
+                        } else if (quickFilter == QuickFilter.RECENT_30D) {
                             "No releases from the past 30 days found for your followed sources."
                         } else {
                             "No scheduled upcoming releases match [${quickFilter.label}].\nTap [ TRACKED ] on the bottom bar to search the live catalog."
@@ -710,14 +818,20 @@ private fun UpcomingFeedView(
         }
 
         monthGroups.forEach { group ->
-            item(key = "hdr_${group.monthHeader}", contentType = "month_header") {
-                MonoText(
-                    text = group.monthHeader,
-                    color = palette.purple,
-                    fontSizeSp = 13,
-                    bold = true,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
+            stickyHeader(key = "hdr_${group.monthHeader}") {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(palette.background)
+                        .padding(vertical = 4.dp)
+                ) {
+                    MonoText(
+                        text = group.monthHeader,
+                        color = palette.purple,
+                        fontSizeSp = 13,
+                        bold = true
+                    )
+                }
             }
             items(
                 items = group.cards,
@@ -772,11 +886,6 @@ private fun UpcomingFeedView(
     }
 }
 
-/**
- * Tapping anywhere on the book box (`AsciiBox`) expands/collapses the card.
- * By default (`alwaysShowCardActions == false`), all action buttons (`[ Audible ]`, `[ ABB ]`,
- * `[ Copy ]`, `[ + Cal ]`, `[ DND Book ]`, `[ DND Series ]`) live inside the expanded view only.
- */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ReleaseScorecard(
@@ -917,8 +1026,6 @@ private fun ReleaseScorecard(
             }
         }
 
-        // Action buttons ([Audible] [ABB] [Copy] [+ Cal] [DND Book] [DND Series])
-        // Shown inside expanded view only by default, or always if toggled ON in SETTINGS
         if (isExpanded || alwaysShowCardActions) {
             Spacer(modifier = Modifier.height(6.dp))
             HorizontalDivider(color = palette.surfaceLine, thickness = 1.dp)
@@ -971,8 +1078,11 @@ private fun TrackedEntitiesView(
     trackedItems: List<TrackedItemEntity>,
     releases: List<ReleaseEntity>,
     enableDirectAdd: Boolean,
-    onAddTracked: (TrackType, String, Int, String) -> Unit,
+    recentlyDeletedItem: TrackedItemEntity?,
+    onAddTracked: (TrackType, String, Int, String, String?) -> Unit,
+    onSelectSourceForFilter: (TrackedItemEntity) -> Unit,
     onDeleteTracked: (TrackedItemEntity) -> Unit,
+    onUndoDelete: (TrackedItemEntity) -> Unit,
     onUpdateSeriesSeq: (TrackedItemEntity, Int) -> Unit,
     onOpenAbbQuery: (String) -> Unit
 ) {
@@ -989,11 +1099,7 @@ private fun TrackedEntitiesView(
     var directLastRead by remember { mutableStateOf("0") }
 
     var sourceFilter by remember { mutableStateOf(TrackedSourceFilter.ALL) }
-
-    val filteredTrackedItems = remember(trackedItems, sourceFilter) {
-        if (sourceFilter.trackType == null) trackedItems
-        else trackedItems.filter { it.type == sourceFilter.trackType }
-    }
+    var sortOrder by remember { mutableStateOf(TrackedSortOrder.A_TO_Z) }
 
     val upcomingCountsByItemId = remember(trackedItems, releases, todayIso) {
         val futureReleases = releases.filter { it.releaseDateIso == "TBA" || it.releaseDateIso >= todayIso }
@@ -1013,8 +1119,26 @@ private fun TrackedEntitiesView(
         }
     }
 
+    val filteredTrackedItems = remember(trackedItems, sourceFilter, sortOrder, upcomingCountsByItemId) {
+        val base = if (sourceFilter.trackType == null) {
+            trackedItems
+        } else {
+            trackedItems.filter { it.type == sourceFilter.trackType }
+        }
+        when (sortOrder) {
+            TrackedSortOrder.A_TO_Z -> base.sortedWith(
+                compareBy<TrackedItemEntity> { it.type.ordinal }
+                    .thenBy { it.queryValue.lowercase(Locale.US) }
+            )
+            TrackedSortOrder.MOST_UPCOMING -> base.sortedWith(
+                compareByDescending<TrackedItemEntity> { upcomingCountsByItemId[it.id] ?: 0 }
+                    .thenBy { it.queryValue.lowercase(Locale.US) }
+            )
+        }
+    }
+
     val trackedKeySet = remember(trackedItems) {
-        trackedItems.map { "${it.type.name}:${it.queryValue.trim().lowercase()}" }.toSet()
+        trackedItems.map { "${it.type.name}:${it.queryValue.trim().lowercase(Locale.US)}" }.toSet()
     }
 
     val performLiveSearch = {
@@ -1036,6 +1160,34 @@ private fun TrackedEntitiesView(
         contentPadding = PaddingValues(bottom = 84.dp),
         modifier = Modifier.fillMaxSize()
     ) {
+        if (recentlyDeletedItem != null) {
+            item(key = "undo_delete_banner", contentType = "undo_banner") {
+                AsciiBox(
+                    headerLabel = "SOURCE REMOVED",
+                    borderColor = palette.orange,
+                    headerColor = palette.orange
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        MonoText(
+                            text = "Removed ${recentlyDeletedItem.type.name}: ${recentlyDeletedItem.queryValue}",
+                            color = palette.orange,
+                            fontSizeSp = 12,
+                            modifier = Modifier.weight(1f)
+                        )
+                        BracketButton(
+                            label = "UNDO",
+                            color = palette.green,
+                            onClick = { onUndoDelete(recentlyDeletedItem) }
+                        )
+                    }
+                }
+            }
+        }
+
         item(key = "search_box", contentType = "search_box") {
             AsciiBox(
                 headerLabel = if (enableDirectAdd && useDirectMode) "DIRECT MANUAL ADD" else "LIVE CATALOG SEARCH"
@@ -1095,7 +1247,7 @@ private fun TrackedEntitiesView(
                     keyboardActions = KeyboardActions(onSearch = {
                         if (enableDirectAdd && useDirectMode) {
                             if (searchQuery.isNotBlank()) {
-                                onAddTracked(directType, searchQuery, directLastRead.toIntOrNull() ?: 0, "")
+                                onAddTracked(directType, searchQuery, directLastRead.toIntOrNull() ?: 0, "", null)
                                 searchQuery = ""
                             }
                         } else {
@@ -1154,7 +1306,8 @@ private fun TrackedEntitiesView(
                                         directType,
                                         searchQuery,
                                         directLastRead.toIntOrNull() ?: 0,
-                                        ""
+                                        "",
+                                        null
                                     )
                                     searchQuery = ""
                                 }
@@ -1203,15 +1356,15 @@ private fun TrackedEntitiesView(
                 contentType = { "live_result" }
             ) { prod ->
                 val seriesTracked = prod.seriesTitle.isNotBlank() &&
-                    "SERIES:${prod.seriesTitle.trim().lowercase()}" in trackedKeySet
+                    "SERIES:${prod.seriesTitle.trim().lowercase(Locale.US)}" in trackedKeySet
                 val firstAuthor = prod.authors.firstOrNull()?.trim().orEmpty()
                 val authorTracked = firstAuthor.isNotBlank() &&
-                    "AUTHOR:${firstAuthor.lowercase()}" in trackedKeySet
+                    "AUTHOR:${firstAuthor.lowercase(Locale.US)}" in trackedKeySet
                 val firstNarrator = prod.narrators.firstOrNull()?.trim().orEmpty()
                 val narratorTracked = firstNarrator.isNotBlank() &&
-                    "NARRATOR:${firstNarrator.lowercase()}" in trackedKeySet
-                val bookTracked = "BOOK:${prod.asin.lowercase()}" in trackedKeySet ||
-                    "BOOK:${prod.title.trim().lowercase()}" in trackedKeySet
+                    "NARRATOR:${firstNarrator.lowercase(Locale.US)}" in trackedKeySet
+                val bookTracked = "BOOK:${prod.asin.lowercase(Locale.US)}" in trackedKeySet ||
+                    "BOOK:${prod.title.trim().lowercase(Locale.US)}" in trackedKeySet
 
                 AsciiBox(
                     headerLabel = "${prod.releaseDateIso} • ${prod.asin}",
@@ -1254,7 +1407,7 @@ private fun TrackedEntitiesView(
                                 active = seriesTracked,
                                 color = palette.purple,
                                 onClick = {
-                                    onAddTracked(TrackType.SERIES, prod.seriesTitle, 0, prod.coverUrl)
+                                    onAddTracked(TrackType.SERIES, prod.seriesTitle, 0, prod.coverUrl, prod.seriesAsin)
                                 }
                             )
                         }
@@ -1263,7 +1416,15 @@ private fun TrackedEntitiesView(
                                 label = if (authorTracked) "✓ Author" else "+ Author",
                                 active = authorTracked,
                                 color = palette.yellow,
-                                onClick = { onAddTracked(TrackType.AUTHOR, firstAuthor, 0, prod.coverUrl) }
+                                onClick = {
+                                    onAddTracked(
+                                        TrackType.AUTHOR,
+                                        firstAuthor,
+                                        0,
+                                        prod.coverUrl,
+                                        prod.primaryAuthorAsin.ifBlank { null }
+                                    )
+                                }
                             )
                         }
                         if (firstNarrator.isNotBlank()) {
@@ -1271,14 +1432,14 @@ private fun TrackedEntitiesView(
                                 label = if (narratorTracked) "✓ Narrator" else "+ Narrator",
                                 active = narratorTracked,
                                 color = palette.orange,
-                                onClick = { onAddTracked(TrackType.NARRATOR, firstNarrator, 0, prod.coverUrl) }
+                                onClick = { onAddTracked(TrackType.NARRATOR, firstNarrator, 0, prod.coverUrl, null) }
                             )
                         }
                         BracketButton(
                             label = if (bookTracked) "✓ Book" else "+ Book",
                             active = bookTracked,
                             color = palette.green,
-                            onClick = { onAddTracked(TrackType.BOOK, prod.asin, 0, prod.coverUrl) }
+                            onClick = { onAddTracked(TrackType.BOOK, prod.asin, 0, prod.coverUrl, prod.asin) }
                         )
                         BracketButton(
                             label = "ABB",
@@ -1292,12 +1453,29 @@ private fun TrackedEntitiesView(
 
         item(key = "followed_hdr", contentType = "followed_hdr") {
             Column(modifier = Modifier.fillMaxWidth()) {
-                MonoText(
-                    text = "FOLLOWED SOURCES (${filteredTrackedItems.size}/${trackedItems.size}):",
-                    color = palette.purple,
-                    fontSizeSp = 12,
-                    bold = true
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    MonoText(
+                        text = "FOLLOWED SOURCES (${filteredTrackedItems.size}/${trackedItems.size}):",
+                        color = palette.purple,
+                        fontSizeSp = 12,
+                        bold = true
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        MonoText(text = "SORT:", color = palette.comment, fontSizeSp = 11)
+                        TrackedSortOrder.values().forEach { so ->
+                            BracketButton(
+                                label = so.label,
+                                active = sortOrder == so,
+                                color = palette.cyan,
+                                onClick = { sortOrder = so }
+                            )
+                        }
+                    }
+                }
                 FlowRow(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -1335,7 +1513,8 @@ private fun TrackedEntitiesView(
 
             AsciiBox(
                 headerLabel = "${item.type.name} • [ $upcomingBadgeCount upcoming ]",
-                headerColor = typeAccent
+                headerColor = typeAccent,
+                onClick = { onSelectSourceForFilter(item) }
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1419,6 +1598,30 @@ private fun SettingsAndBackupView(
         contentPadding = PaddingValues(bottom = 84.dp),
         modifier = Modifier.fillMaxSize()
     ) {
+        item(key = "cfg_theme") {
+            AsciiBox(headerLabel = "APPEARANCE & SYSTEM THEME") {
+                MonoText(
+                    text = "Follow Android system Dark/Light mode automatically or lock to Dracula / Alucard:",
+                    color = palette.comment,
+                    fontSizeSp = 12
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    ThemeMode.values().forEach { mode ->
+                        BracketButton(
+                            label = mode.label,
+                            active = prefs.themeMode == mode,
+                            color = palette.orange,
+                            onClick = { onUpdatePrefs(prefs.copy(themeModeCode = mode.code)) }
+                        )
+                    }
+                }
+            }
+        }
+
         item(key = "cfg_options") {
             AsciiBox(headerLabel = "CATALOG & TRACKER OPTIONS") {
                 Row(
@@ -1469,7 +1672,6 @@ private fun SettingsAndBackupView(
                         onClick = { onUpdatePrefs(prefs.copy(enableDirectAdd = !prefs.enableDirectAdd)) }
                     )
                 }
-                // Toggle to show action buttons on collapsed cards like before
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -1651,7 +1853,7 @@ private fun AboutPageView(onBack: () -> Unit) {
                     bold = true
                 )
                 MonoText(
-                    text = "Version 1.7.0 • Plain-Text Audiobook Release Tracker",
+                    text = "Version 2.3.0 • Plain-Text Audiobook Release Tracker",
                     color = palette.cyan,
                     fontSizeSp = 12,
                     bold = true
@@ -1674,7 +1876,7 @@ private fun AboutPageView(onBack: () -> Unit) {
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 MonoText(
-                    text = "• Color Palettes: Official Dracula Dark (#282A36) and Alucard Light (#FFFBEB) specifications.",
+                    text = "• Color Palettes: Official Dracula Dark (#282A36) and Alucard Light (#FFFBEB) specifications with System Auto theme synchronization.",
                     color = palette.foreground,
                     fontSizeSp = 12
                 )
@@ -1690,7 +1892,7 @@ private fun AboutPageView(onBack: () -> Unit) {
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 MonoText(
-                    text = "• Smart Deduplication & DND: Automatically merges multi-source clashes into a single card and suppresses muted books or series from future syncs and T-7d / T-0d notifications.",
+                    text = "• Smart Deduplication & DND: Automatically merges multi-region clashes into a single card, blocks podcasts/periodicals, and suppresses muted books or series from future syncs and T-7d / T-0d notifications.",
                     color = palette.foreground,
                     fontSizeSp = 12
                 )

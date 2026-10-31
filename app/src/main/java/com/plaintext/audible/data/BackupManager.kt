@@ -8,14 +8,14 @@ object BackupManager {
         val root = JSONObject()
         val prefs = repo.getPrefs()
 
-        root.put("version", 5)
+        root.put("version", 6)
         root.put("prefs", JSONObject().apply {
             put("englishOnly", prefs.englishOnly)
             put("hideAbridged", prefs.hideAbridged)
             put("hideDramatized", prefs.hideDramatized)
             put("enableDirectAdd", prefs.enableDirectAdd)
             put("alwaysShowCardActions", prefs.alwaysShowCardActions)
-            put("isDarkTheme", prefs.isDarkTheme)
+            put("themeModeCode", prefs.themeModeCode)
             put("notifyHour", prefs.notifyHour)
             put("notifyMinute", prefs.notifyMinute)
             put("marketplaceCode", prefs.marketplaceCode)
@@ -49,6 +49,13 @@ object BackupManager {
     suspend fun importJson(repo: ReleaseRepository, rawJson: String) {
         val root = JSONObject(rawJson)
         root.optJSONObject("prefs")?.let { p ->
+            val themeCode = p.optString("themeModeCode", "").ifBlank {
+                if (p.has("isDarkTheme")) {
+                    if (p.optBoolean("isDarkTheme", true)) "DARK" else "LIGHT"
+                } else {
+                    "SYSTEM"
+                }
+            }
             repo.savePrefs(
                 FilterPrefs(
                     englishOnly = p.optBoolean("englishOnly", true),
@@ -56,7 +63,7 @@ object BackupManager {
                     hideDramatized = p.optBoolean("hideDramatized", false),
                     enableDirectAdd = p.optBoolean("enableDirectAdd", false),
                     alwaysShowCardActions = p.optBoolean("alwaysShowCardActions", false),
-                    isDarkTheme = p.optBoolean("isDarkTheme", true),
+                    themeModeCode = themeCode,
                     notifyHour = p.optInt("notifyHour", 9),
                     notifyMinute = p.optInt("notifyMinute", 0),
                     marketplaceCode = p.optString("marketplaceCode", "US")
@@ -71,7 +78,8 @@ object BackupManager {
                     type = TrackType.valueOf(o.getString("type")),
                     rawQuery = o.getString("queryValue"),
                     lastReadSequence = o.optInt("lastReadSequence", 0),
-                    initialThumbnailUrl = o.optString("thumbnailUrl", "")
+                    initialThumbnailUrl = o.optString("thumbnailUrl", ""),
+                    externalId = o.optString("externalId", "").ifBlank { null }
                 )
             }
         }
