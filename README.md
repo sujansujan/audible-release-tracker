@@ -1,10 +1,11 @@
-# NocturneTXT — Plain-Text Audiobook Release Tracker (v2.4)
+# NocturneTXT — Plain-Text Audiobook Release Tracker (v2.5)
 
 A lean, native Android app inspired by [Plain Text Sports](https://plaintextsports.com/) with official [Dracula and Alucard](https://draculatheme.com/spec) themes for tracking upcoming Audible releases (`api.audible.com/1.0/catalog/products`).
 
-## Key Highlights in v2.4 (Under-the-Hood Reliability Suite)
-1. **Paginated Deep Catalog Sync (Up to 150 Books per Source)**: Automatically fetches up to 3 pages (`num_results=50`, `page=0..2`) sorted by `-ReleaseDate` when a prolific author or series has a full page of future/recent entries so foreign translations or box sets never push an upcoming release off page 1.
-2. **Release Date Shift & Delay Detector (`[ MOVED: old -> new ]`)**: Tracks `previousReleaseDateIso` in Room (`MIGRATION_4_5`) whenever a publisher moves a pre-order's release date forward or backward, displaying the shift inside the expanded scorecard view.
-3. **"Narrator TBA -> Announced" Detector (`[ NARRATOR ANNOUNCED ]`)**: Detects when an existing pre-order transitions from `Narrator: TBA` to a confirmed narrator and highlights the announcement inside the expanded scorecard view.
-4. **Automatic 30-Day LRU Disk Cache Pruning (`pruneStaleDiskCache`)**: Runs a lightweight background sweep on startup that deletes cached JSON and cover files older than 30 days and enforces a hard 15 MB ceiling by evicting oldest files first.
-5. **Sync Telemetry & Offline Status Line in `SETTINGS`**: Records the last sync timestamp, synced source count, error count, and offline fallback status (`Last Synced: YYYY-MM-DD HH:mm • X sources • Y errors`) inside `SETTINGS`.
+## Key Highlights in v2.5 (De-Duplicated UI & Settings Cleanup)
+1. **Single Theme Control in `SETTINGS`**: Removed the duplicate theme switcher button from the top-right header bar (leaving only `[ SYNC ]` on the right) while keeping the `SYSTEM AUTO` / `DRACULA` / `ALUCARD` selector in `SETTINGS`.
+2. **Streamlined `[ LIVE SEARCH ]` / `[ DIRECT ADD ]` in `TRACKED`**: Removed the redundant `Direct Manual Add Mode` toggle from `SETTINGS`—the `[ LIVE SEARCH ]` and `[ DIRECT ADD ]` switch is now directly available in `TRACKED`.
+3. **Cleaner Notification Schedule Controls**: Removed the redundant `[ Reset 09:00 ]` button, keeping just `[ -1 Hour ]` and `[ +1 Hour ]`.
+4. **Smart `+ Track Series` / `+ Track Author` Buttons on Expanded Cards**: Expanded release cards now only show `[ + Track Series ]` or `[ + Track Author ]` if that series or author is **not** already in your `TRACKED` list.
+5. **Contextual `[ CLEAR ]` in `TRACKED`**: `[ CLEAR ]` now appears only when live catalog search results are actually open on screen.
+6. **Clean Top-Left Tab Header (`[ UPCOMING ]`, `[ TRACKED ]`, `[ SETTINGS ]`)**: Removed the redundant `// US` marketplace code from the top-left header bar.

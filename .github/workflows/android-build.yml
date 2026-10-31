@@ -72,14 +72,14 @@ jobs:
 
       - name: Rename APKs With Explicit Version Tag
         run: |
-          cp app/build/outputs/apk/release/app-release.apk app/build/outputs/apk/release/nocturnetxt-v2.4-release.apk
-          cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/nocturnetxt-v2.4-debug.apk
+          cp app/build/outputs/apk/release/app-release.apk app/build/outputs/apk/release/nocturnetxt-v2.5-release.apk
+          cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/nocturnetxt-v2.5-debug.apk
 
-      - name: Upload Optimized v2.4 APK Artifact
+      - name: Upload Optimized v2.5 APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nocturnetxt-v2.4-apk-${{ github.run_number }}
+          name: nocturnetxt-v2.5-apk-${{ github.run_number }}
           overwrite: true
           path: |
-            app/build/outputs/apk/release/nocturnetxt-v2.4-release.apk
-            app/build/outputs/apk/debug/nocturnetxt-v2.4-debug.apk
+            app/build/outputs/apk/release/nocturnetxt-v2.5-release.apk
+            app/build/outputs/apk/debug/nocturnetxt-v2.5-debug.apk

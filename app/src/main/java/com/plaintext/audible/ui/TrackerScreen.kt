@@ -93,7 +93,9 @@ data class ReleaseCardUiModel(
     val hasSeriesGap: Boolean,
     val unreadGapBookNum: Int,
     val canMarkCurrentRead: Boolean,
-    val primaryAuthor: String
+    val primaryAuthor: String,
+    val isSeriesAlreadyTracked: Boolean,
+    val isPrimaryAuthorAlreadyTracked: Boolean
 )
 
 @Immutable
@@ -231,12 +233,6 @@ fun TrackerScreen(
         releases.count { it.releaseDateIso != "TBA" && it.releaseDateIso >= todayIso }
     }
 
-    val themeButtonLabel = when (prefs.themeMode) {
-        ThemeMode.SYSTEM -> "AUTO:${palette.name}"
-        ThemeMode.DARK -> "DRACULA"
-        ThemeMode.LIGHT -> "ALUCARD"
-    }
-
     CompositionLocalProvider(LocalPtsPalette provides palette) {
         Box(
             modifier = Modifier
@@ -250,47 +246,32 @@ fun TrackerScreen(
                     .fillMaxSize()
                     .padding(horizontal = 12.dp, vertical = 6.dp)
             ) {
+                // Item #1 & #6: Clean top header with [ TAB ] on left and only [ SYNC ] on right
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     MonoText(
-                        text = "[ ${activeTab.name} // ${prefs.marketplace.code} ]",
+                        text = "[ ${activeTab.name} ]",
                         color = palette.comment,
                         fontSizeSp = 13,
                         bold = true
                     )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        BracketButton(
-                            label = if (isSyncing) "SYNCING..." else "SYNC",
-                            color = palette.green,
-                            onClick = {
-                                if (!isSyncing) {
-                                    scope.launch {
-                                        isSyncing = true
-                                        repo.syncCatalog(forceRefresh = true)
-                                        syncTelemetry = repo.getSyncTelemetry()
-                                        isSyncing = false
-                                    }
+                    BracketButton(
+                        label = if (isSyncing) "SYNCING..." else "SYNC",
+                        color = palette.green,
+                        onClick = {
+                            if (!isSyncing) {
+                                scope.launch {
+                                    isSyncing = true
+                                    repo.syncCatalog(forceRefresh = true)
+                                    syncTelemetry = repo.getSyncTelemetry()
+                                    isSyncing = false
                                 }
                             }
-                        )
-                        BracketButton(
-                            label = themeButtonLabel,
-                            color = palette.orange,
-                            onClick = {
-                                val nextMode = when (prefs.themeMode) {
-                                    ThemeMode.SYSTEM -> ThemeMode.DARK
-                                    ThemeMode.DARK -> ThemeMode.LIGHT
-                                    ThemeMode.LIGHT -> ThemeMode.SYSTEM
-                                }
-                                val updated = prefs.copy(themeModeCode = nextMode.code)
-                                prefs = updated
-                                repo.savePrefs(updated)
-                            }
-                        )
-                    }
+                        }
+                    )
                 }
 
                 HorizontalDivider(color = palette.surfaceLine, thickness = 1.dp)
@@ -378,7 +359,6 @@ fun TrackerScreen(
                         ActiveTab.TRACKED -> TrackedEntitiesView(
                             trackedItems = trackedItems,
                             releases = releases,
-                            enableDirectAdd = prefs.enableDirectAdd,
                             recentlyDeletedItem = recentlyDeletedItem,
                             onAddTracked = handleAddTracked,
                             onSelectSourceForFilter = { item ->
@@ -640,6 +620,7 @@ private fun UpcomingFeedView(
         todayIso
     ) {
         val seriesList = trackedItems.filter { it.type == TrackType.SERIES }
+        val authorList = trackedItems.filter { it.type == TrackType.AUTHOR }
 
         fun toUiModel(rel: ReleaseEntity): ReleaseCardUiModel {
             val parsedDate = runCatching { LocalDate.parse(rel.releaseDateIso) }.getOrNull()
@@ -660,9 +641,17 @@ private fun UpcomingFeedView(
 
             val matchedSeries = if (rel.seriesTitle.isNotBlank()) {
                 seriesList.firstOrNull { s ->
-                    rel.seriesTitle.contains(s.queryValue, ignoreCase = true)
+                    rel.seriesTitle.contains(s.queryValue, ignoreCase = true) ||
+                        s.queryValue.contains(rel.seriesTitle, ignoreCase = true)
                 }
             } else null
+
+            val primaryAuthor = rel.authors.split(",").firstOrNull()?.trim().orEmpty()
+            val isAuthorTracked = primaryAuthor.isNotBlank() && authorList.any { a ->
+                a.queryValue.equals(primaryAuthor, ignoreCase = true) ||
+                    primaryAuthor.contains(a.queryValue, ignoreCase = true) ||
+                    a.queryValue.contains(primaryAuthor, ignoreCase = true)
+            }
 
             val seq = rel.seriesSequence
             val hasGap = matchedSeries != null && seq != null && seq > 1 && matchedSeries.lastReadSequence < (seq - 1)
@@ -688,7 +677,9 @@ private fun UpcomingFeedView(
                 hasSeriesGap = hasGap,
                 unreadGapBookNum = (seq ?: 1) - 1,
                 canMarkCurrentRead = canMarkRead,
-                primaryAuthor = rel.authors.split(",").firstOrNull()?.trim().orEmpty()
+                primaryAuthor = primaryAuthor,
+                isSeriesAlreadyTracked = matchedSeries != null,
+                isPrimaryAuthorAlreadyTracked = isAuthorTracked
             )
         }
 
@@ -1028,30 +1019,37 @@ private fun ReleaseScorecard(
                 fontSizeSp = 12
             )
 
-            Spacer(modifier = Modifier.height(6.dp))
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                if (card.canMarkCurrentRead && card.matchedSeriesItem != null && rel.seriesSequence != null) {
-                    BracketButton(
-                        label = "✓ Mark Book #${rel.seriesSequence} Read",
-                        color = palette.green,
-                        onClick = { onMarkSeriesSeqRead(card.matchedSeriesItem, rel.seriesSequence) }
-                    )
-                }
-                if (rel.seriesTitle.isNotBlank()) {
-                    BracketButton(
-                        label = "+ Track Series",
-                        color = palette.purple,
-                        onClick = { onQuickTrack(TrackType.SERIES, rel.seriesTitle, rel.coverUrl) }
-                    )
-                }
-                if (card.primaryAuthor.isNotBlank()) {
-                    BracketButton(
-                        label = "+ Track Author",
-                        color = palette.yellow,
-                        onClick = { onQuickTrack(TrackType.AUTHOR, card.primaryAuthor, rel.coverUrl) }
-                    )
+            // Item #4: Only show + Track Series / + Track Author if NOT already tracked
+            val showMarkRead = card.canMarkCurrentRead && card.matchedSeriesItem != null && rel.seriesSequence != null
+            val showTrackSeries = rel.seriesTitle.isNotBlank() && !card.isSeriesAlreadyTracked
+            val showTrackAuthor = card.primaryAuthor.isNotBlank() && !card.isPrimaryAuthorAlreadyTracked
+
+            if (showMarkRead || showTrackSeries || showTrackAuthor) {
+                Spacer(modifier = Modifier.height(6.dp))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (showMarkRead && card.matchedSeriesItem != null && rel.seriesSequence != null) {
+                        BracketButton(
+                            label = "✓ Mark Book #${rel.seriesSequence} Read",
+                            color = palette.green,
+                            onClick = { onMarkSeriesSeqRead(card.matchedSeriesItem, rel.seriesSequence) }
+                        )
+                    }
+                    if (showTrackSeries) {
+                        BracketButton(
+                            label = "+ Track Series",
+                            color = palette.purple,
+                            onClick = { onQuickTrack(TrackType.SERIES, rel.seriesTitle, rel.coverUrl) }
+                        )
+                    }
+                    if (showTrackAuthor) {
+                        BracketButton(
+                            label = "+ Track Author",
+                            color = palette.yellow,
+                            onClick = { onQuickTrack(TrackType.AUTHOR, card.primaryAuthor, rel.coverUrl) }
+                        )
+                    }
                 }
             }
         }
@@ -1107,7 +1105,6 @@ private fun ReleaseScorecard(
 private fun TrackedEntitiesView(
     trackedItems: List<TrackedItemEntity>,
     releases: List<ReleaseEntity>,
-    enableDirectAdd: Boolean,
     recentlyDeletedItem: TrackedItemEntity?,
     onAddTracked: (TrackType, String, Int, String, String?) -> Unit,
     onSelectSourceForFilter: (TrackedItemEntity) -> Unit,
@@ -1219,30 +1216,30 @@ private fun TrackedEntitiesView(
             }
         }
 
+        // Item #2 & #5: Direct [ LIVE SEARCH ] / [ DIRECT ADD ] switch inside TRACKED search box,
+        // and [ CLEAR ] shown only when catalogResults is non-empty
         item(key = "search_box", contentType = "search_box") {
             AsciiBox(
-                headerLabel = if (enableDirectAdd && useDirectMode) "DIRECT MANUAL ADD" else "LIVE CATALOG SEARCH"
+                headerLabel = if (useDirectMode) "DIRECT MANUAL ADD" else "LIVE CATALOG SEARCH"
             ) {
-                if (enableDirectAdd) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        BracketButton(
-                            label = "LIVE SEARCH",
-                            active = !useDirectMode,
-                            onClick = { useDirectMode = false }
-                        )
-                        BracketButton(
-                            label = "DIRECT ADD",
-                            active = useDirectMode,
-                            onClick = { useDirectMode = true }
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    BracketButton(
+                        label = "LIVE SEARCH",
+                        active = !useDirectMode,
+                        onClick = { useDirectMode = false }
+                    )
+                    BracketButton(
+                        label = "DIRECT ADD",
+                        active = useDirectMode,
+                        onClick = { useDirectMode = true }
+                    )
                 }
+                Spacer(modifier = Modifier.height(4.dp))
 
-                if (enableDirectAdd && useDirectMode) {
+                if (useDirectMode) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween
@@ -1259,7 +1256,7 @@ private fun TrackedEntitiesView(
                 }
 
                 MonoText(
-                    text = if (enableDirectAdd && useDirectMode) {
+                    text = if (useDirectMode) {
                         if (directType == TrackType.BOOK) "Enter Book Title or 10-char Audible ASIN:"
                         else "Enter Exact ${directType.name.lowercase().replaceFirstChar { it.uppercase() }} Name:"
                     } else {
@@ -1276,7 +1273,7 @@ private fun TrackedEntitiesView(
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                     keyboardActions = KeyboardActions(onSearch = {
-                        if (enableDirectAdd && useDirectMode) {
+                        if (useDirectMode) {
                             if (searchQuery.isNotBlank()) {
                                 onAddTracked(directType, searchQuery, directLastRead.toIntOrNull() ?: 0, "", null)
                                 searchQuery = ""
@@ -1297,7 +1294,7 @@ private fun TrackedEntitiesView(
                         .padding(10.dp)
                 )
 
-                if (enableDirectAdd && useDirectMode && directType == TrackType.SERIES) {
+                if (useDirectMode && directType == TrackType.SERIES) {
                     Spacer(modifier = Modifier.height(6.dp))
                     MonoText(
                         text = "Last Completed Book # in Series (for Gap Detector):",
@@ -1327,7 +1324,7 @@ private fun TrackedEntitiesView(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    if (enableDirectAdd && useDirectMode) {
+                    if (useDirectMode) {
                         BracketButton(
                             label = "+ ADD DIRECTLY",
                             color = palette.green,
@@ -1358,7 +1355,8 @@ private fun TrackedEntitiesView(
                             onClick = { onOpenAbbQuery(searchQuery) }
                         )
                     }
-                    if (catalogResults.isNotEmpty() || searchQuery.isNotBlank()) {
+                    // Item #5: Only show [ CLEAR ] when live catalog results are open
+                    if (catalogResults.isNotEmpty() && !useDirectMode) {
                         BracketButton(
                             label = "CLEAR",
                             color = palette.comment,
@@ -1372,7 +1370,7 @@ private fun TrackedEntitiesView(
             }
         }
 
-        if (catalogResults.isNotEmpty() && !(enableDirectAdd && useDirectMode)) {
+        if (catalogResults.isNotEmpty() && !useDirectMode) {
             item(key = "live_hdr", contentType = "header") {
                 MonoText(
                     text = "LIVE CATALOG RESULTS (${catalogResults.size}) - TAP TO FOLLOW:",
@@ -1654,6 +1652,7 @@ private fun SettingsAndBackupView(
             }
         }
 
+        // Item #2: Removed redundant Direct Manual Add Mode toggle from SETTINGS
         item(key = "cfg_options") {
             AsciiBox(headerLabel = "CATALOG & TRACKER OPTIONS") {
                 Row(
@@ -1697,18 +1696,6 @@ private fun SettingsAndBackupView(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    MonoText("Direct Manual Add Mode")
-                    BracketButton(
-                        label = if (prefs.enableDirectAdd) "ON" else "OFF",
-                        active = prefs.enableDirectAdd,
-                        onClick = { onUpdatePrefs(prefs.copy(enableDirectAdd = !prefs.enableDirectAdd)) }
-                    )
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
                     MonoText("Always Show Card Actions")
                     BracketButton(
                         label = if (prefs.alwaysShowCardActions) "ON" else "OFF",
@@ -1742,6 +1729,7 @@ private fun SettingsAndBackupView(
             }
         }
 
+        // Item #3: Removed [ Reset 09:00 ] button from NOTIFICATION SCHEDULE
         item(key = "cfg_notif") {
             AsciiBox(headerLabel = "NOTIFICATION SCHEDULE (T-7d & T-0d)") {
                 MonoText(
@@ -1766,11 +1754,6 @@ private fun SettingsAndBackupView(
                             val h = (prefs.notifyHour + 1) % 24
                             onUpdatePrefs(prefs.copy(notifyHour = h))
                         }
-                    )
-                    BracketButton(
-                        label = "Reset 09:00",
-                        color = palette.orange,
-                        onClick = { onUpdatePrefs(prefs.copy(notifyHour = 9, notifyMinute = 0)) }
                     )
                 }
             }
@@ -1892,7 +1875,7 @@ private fun AboutPageView(onBack: () -> Unit) {
                     bold = true
                 )
                 MonoText(
-                    text = "Version 2.4.0 • Plain-Text Audiobook Release Tracker",
+                    text = "Version 2.5.0 • Plain-Text Audiobook Release Tracker",
                     color = palette.cyan,
                     fontSizeSp = 12,
                     bold = true
