@@ -9,19 +9,26 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -40,10 +47,12 @@ object ThumbnailCache {
     }
 }
 
+val StandardThumbnailSize = 56.dp
+
 @Composable
 fun CoverThumbnail(
     coverUrl: String,
-    sizeDp: Dp = 58.dp,
+    sizeDp: Dp = StandardThumbnailSize,
     fallbackText: String = "[IMG]",
     borderColor: Color = LocalPtsPalette.current.comment,
     modifier: Modifier = Modifier
@@ -70,7 +79,7 @@ fun CoverThumbnail(
                         val conn = (URL(coverUrl).openConnection() as HttpURLConnection).apply {
                             connectTimeout = 8_000
                             readTimeout = 8_000
-                            setRequestProperty("User-Agent", "NocturneTXT/1.7 (Android)")
+                            setRequestProperty("User-Agent", "NocturneTXT/2.8 (Android)")
                         }
                         try {
                             if (conn.responseCode in 200..299) {
@@ -127,6 +136,90 @@ fun CoverThumbnail(
                 fontFamily = FontFamily.Monospace,
                 fontSize = 10.sp,
                 color = borderColor
+            )
+        }
+    }
+}
+
+@Composable
+fun AsciiSectionHeader(
+    title: String,
+    color: Color = LocalPtsPalette.current.purple,
+    modifier: Modifier = Modifier
+) {
+    val palette = LocalPtsPalette.current
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(palette.background)
+            .padding(vertical = 4.dp)
+    ) {
+        MonoText(
+            text = "+=== ${title.uppercase()} ===+",
+            color = color,
+            fontSizeSp = 13,
+            bold = true
+        )
+    }
+}
+
+@Composable
+fun AsciiTextField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String = "",
+    imeAction: ImeAction = ImeAction.Done,
+    onImeAction: () -> Unit = {},
+    modifier: Modifier = Modifier
+) {
+    val palette = LocalPtsPalette.current
+    var isFocused by remember { mutableStateOf(false) }
+    val borderColor = if (isFocused) palette.cyan else palette.comment
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier
+            .fillMaxWidth()
+            .background(palette.surfaceLine.copy(alpha = 0.25f))
+            .border(1.dp, borderColor)
+            .padding(horizontal = 10.dp, vertical = 9.dp)
+    ) {
+        Text(
+            text = "> ",
+            fontFamily = FontFamily.Monospace,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold,
+            color = if (isFocused) palette.cyan else palette.comment
+        )
+        Box(modifier = Modifier.weight(1f)) {
+            if (value.isEmpty() && placeholder.isNotEmpty()) {
+                Text(
+                    text = placeholder,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 13.sp,
+                    color = palette.comment.copy(alpha = 0.75f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            BasicTextField(
+                value = value,
+                onValueChange = onValueChange,
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = imeAction),
+                keyboardActions = KeyboardActions(
+                    onSearch = { onImeAction() },
+                    onDone = { onImeAction() }
+                ),
+                textStyle = TextStyle(
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 14.sp,
+                    color = palette.foreground
+                ),
+                cursorBrush = SolidColor(palette.cyan),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .onFocusChanged { isFocused = it.isFocused }
             )
         }
     }

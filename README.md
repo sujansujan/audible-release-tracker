@@ -1,12 +1,15 @@
-# NocturneTXT — Plain-Text Audiobook Release Tracker (v2.7)
+# NocturneTXT — Plain-Text Audiobook Release Tracker (v2.8)
 
 A lean, native Android app inspired by [Plain Text Sports](https://plaintextsports.com/) with official [Dracula and Alucard](https://draculatheme.com/spec) themes for tracking upcoming Audible releases (`api.audible.com/1.0/catalog/products`).
 
-## Key Highlights in v2.7 (Tested & Verified ABB Checker)
-1. **Verified AudioBookBay (`ABB`) Availability & Magnet Checker**:
-   - Sends full browser `Origin`, `Referer`, and `Sec-Fetch-*` headers required by AudioBookBay's anti-bot filter.
-   - Queries the clean core book title (`?s=he+who+fights+with+monsters+13`) without appending pen-name/real-name hybrids (`Shirtaloon` vs `Travis Deverell`), and checks any credit name (`Shirtaloon` or `Deverell` or `Heath Miller`) across both the `<div class="postTitle"><h2><a href="...">` heading and the surrounding `<div class="post">` block.
-   - Supports both relative (`/audio-books/...`) and full (`https://audiobookbay.../abss/...`) post URLs across `.lu`, `.is`, `.fi`, and `.se` mirrors.
-   - Sorts candidate releases newest-first (`sortedByDescending { it.releaseDateIso }`) so recent releases like *He Who Fights with Monsters 13* are always checked first, and adds a 1-tap **`[ Check ABB ]`** button inside the expanded card for instant on-demand verification.
-2. **Series-Author & ASIN Pinning**: Prevents same-name series by different authors from colliding.
-3. **1-Tap `[ Magnet ]` Launch / Copy**: Automatically extracts the 40-char BitTorrent `Info Hash` from the matched ABB post page.
+## Key Highlights in v2.8 (Unified Design Language & De-Clutter Suite)
+1. **Standardized `56dp` Thumbnails & Semantic Borders Everywhere**: Every card across `UPCOMING`, `TRACKED` live search results, and `TRACKED` followed sources uses the exact same `56dp` thumbnail with its semantic accent border.
+2. **Unified `14sp` Bold Uppercase Card Titles & `12sp` Metadata Grid**: All primary card titles across `UPCOMING` and `TRACKED` share the same `14sp` bold uppercase typography and `12sp` metadata lines.
+3. **Standardized `+=== SECTION ===+` ASCII Dividers**: `UPCOMING` month headers, `DND` headers, `LIVE CATALOG RESULTS`, and `FOLLOWED SOURCES` all use the same `AsciiSectionHeader` (`+=== ... ===+`).
+4. **Framed `1dp` Terminal Input Fields (`AsciiTextField`)**: Text inputs in `TRACKED` now feature a crisp `1dp` border (highlighting in `cyan` on focus) and a `>` terminal prompt prefix.
+5. **Docked Bottom Filter & Sort Strip on Both `UPCOMING` & `TRACKED`**: `BottomThumbBar` now docks the `FLT:` and `SRT:` horizontal filter/sort strip on `TRACKED` just like `UPCOMING`.
+6. **Consolidated Single-Location Status Badges**: Status tags (`[ NEW ]`, `[ ABB ]`) appear once in the card's top `+---[ ... ]---+` frame header with no duplicate badge line inside the card body.
+7. **Clean `TRACKED` Card Headers & Body Author Line**: Followed `SERIES` and `BOOK` cards display `+---[ SERIES • 1 UPCOMING ]---+` in the header and `Author: <Name>` cleanly inside the card body.
+8. **`Match: [...]` Moved to Expanded View**: Collapsed cards in `UPCOMING` now show a tight 3-line block (`Title`, `Series`, `Author/Narrator`) matching the `56dp` thumbnail height, with `Match: [...]` displayed alongside `Runtime` and `Publisher` when expanded.
+9. **De-Cluttered `TRACKED` Followed Rows**: Removed the duplicate `[ ABB ]` button from compact followed rows so long author/series names and `-1` / `+1` sequence buttons never wrap.
+10. **Context-Aware Top Bar (`[ SYNC ]` Hidden on `SETTINGS` / `ABOUT`)**: Hides `[ SYNC ]` when viewing `SETTINGS` or `ABOUT`.
