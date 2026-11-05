@@ -6,10 +6,7 @@ import androidx.compose.runtime.Immutable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-<<<<<<< HEAD
 import kotlinx.coroutines.delay
-=======
->>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.time.Instant
@@ -74,10 +71,7 @@ data class FilterPrefs(
     val hideDramatized: Boolean = false,
     val enableDirectAdd: Boolean = false,
     val alwaysShowCardActions: Boolean = false,
-<<<<<<< HEAD
     val checkAbbDaily: Boolean = true,
-=======
->>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
     val themeModeCode: String = "SYSTEM",
     val notifyHour: Int = 9,
     val notifyMinute: Int = 0,
@@ -96,14 +90,11 @@ class ReleaseRepository(context: Context) {
     private val prefs: SharedPreferences =
         context.getSharedPreferences("pts_audible_prefs", Context.MODE_PRIVATE)
     private val syncSemaphore = Semaphore(4)
-<<<<<<< HEAD
     private val abbSemaphore = Semaphore(1)
 
     companion object {
         private const val ABB_DAILY_INTERVAL_MS = 20L * 60L * 60L * 1000L
     }
-=======
->>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
 
     init {
         AudibleApiClient.initCache(context.applicationContext.cacheDir)
@@ -115,10 +106,7 @@ class ReleaseRepository(context: Context) {
         hideDramatized = prefs.getBoolean("hide_dramatized", false),
         enableDirectAdd = prefs.getBoolean("enable_direct_add", false),
         alwaysShowCardActions = prefs.getBoolean("always_show_card_actions", false),
-<<<<<<< HEAD
         checkAbbDaily = prefs.getBoolean("check_abb_daily", true),
-=======
->>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
         themeModeCode = prefs.getString("theme_mode", "SYSTEM") ?: "SYSTEM",
         notifyHour = prefs.getInt("notify_hour", 9),
         notifyMinute = prefs.getInt("notify_minute", 0),
@@ -132,10 +120,7 @@ class ReleaseRepository(context: Context) {
             .putBoolean("hide_dramatized", newPrefs.hideDramatized)
             .putBoolean("enable_direct_add", newPrefs.enableDirectAdd)
             .putBoolean("always_show_card_actions", newPrefs.alwaysShowCardActions)
-<<<<<<< HEAD
             .putBoolean("check_abb_daily", newPrefs.checkAbbDaily)
-=======
->>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
             .putString("theme_mode", newPrefs.themeModeCode)
             .putInt("notify_hour", newPrefs.notifyHour)
             .putInt("notify_minute", newPrefs.notifyMinute)
@@ -192,11 +177,7 @@ class ReleaseRepository(context: Context) {
 
         val resolvedThumb = when (type) {
             TrackType.AUTHOR -> {
-<<<<<<< HEAD
                 AudibleApiClient.fetchAudibleAuthorImageUrl(cleaned, externalId?.substringBefore("|")) ?: initialThumbnailUrl
-=======
-                AudibleApiClient.fetchAudibleAuthorImageUrl(cleaned, externalId) ?: initialThumbnailUrl
->>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
             }
             TrackType.NARRATOR -> {
                 AudibleApiClient.fetchNarratorPortraitUrl(cleaned) ?: initialThumbnailUrl
@@ -238,7 +219,6 @@ class ReleaseRepository(context: Context) {
             .replace(Regex("[^a-z0-9]"), "")
     }
 
-<<<<<<< HEAD
     /**
      * Exact word-boundary name check so short names (e.g. "Actus" or "Will")
      * never match inside longer unrelated names.
@@ -252,8 +232,6 @@ class ReleaseRepository(context: Context) {
         return Regex("\\b$escaped\\b", RegexOption.IGNORE_CASE).containsMatchIn(cand)
     }
 
-=======
->>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
     private fun mergeDuplicateEditions(existing: CatalogProduct, candidate: CatalogProduct): CatalogProduct {
         val chosenCover = when {
             existing.coverUrl.isNotBlank() && candidate.coverUrl.isBlank() -> existing.coverUrl
@@ -269,7 +247,6 @@ class ReleaseRepository(context: Context) {
             candidate.releaseDateIso == "TBA" -> existing.releaseDateIso
             candidate.releaseDateIso < existing.releaseDateIso -> candidate.releaseDateIso
             else -> existing.releaseDateIso
-<<<<<<< HEAD
         }
 
         val chosenSynopsis = if (candidate.synopsis.length > existing.synopsis.length) {
@@ -334,163 +311,10 @@ class ReleaseRepository(context: Context) {
                         postUrl = match.postUrl,
                         magnetUri = match.magnetUri
                     )
-=======
-        }
-
-        val chosenSynopsis = if (candidate.synopsis.length > existing.synopsis.length) {
-            candidate.synopsis
-        } else {
-            existing.synopsis
-        }
-        val chosenRuntime = maxOf(existing.runtimeMinutes, candidate.runtimeMinutes)
-        val chosenPublisher = existing.publisher.ifBlank { candidate.publisher }
-        val chosenNarrators = if (existing.narrators.isNotEmpty()) existing.narrators else candidate.narrators
-
-        val base = if (existing.coverUrl.isBlank() && candidate.coverUrl.isNotBlank()) candidate else existing
-        return base.copy(
-            coverUrl = chosenCover,
-            seriesTitle = chosenSeriesTitle,
-            seriesAsin = chosenSeriesAsin,
-            seriesSequence = chosenSeriesSeq,
-            releaseDateIso = chosenReleaseDate,
-            synopsis = chosenSynopsis,
-            runtimeMinutes = chosenRuntime,
-            publisher = chosenPublisher,
-            narrators = chosenNarrators
-        )
-    }
-
-    suspend fun syncCatalog(forceRefresh: Boolean = false): List<ReleaseEntity> {
-        // 1. Run lightweight 30-day & 15 MB LRU disk cache pruner
-        AudibleApiClient.pruneStaleDiskCache()
-        AudibleApiClient.syncNetworkErrorCount.set(0)
-        AudibleApiClient.syncUsedStaleCacheCount.set(0)
-
-        val tracked = dao.getAllTrackedItems()
-        if (tracked.isEmpty()) {
-            dao.clearAllReleases()
-            saveSyncTelemetry(sourcesCount = 0, errorCount = 0, usedCachedFallback = false)
-            return emptyList()
-        }
-
-        val dndRules = dao.getAllDndRules()
-        val existingReleases = dao.getAllReleases()
-        val existingByAsin = existingReleases.associateBy { it.asin }
-        val existingByGroupKey = existingReleases.associateBy { rel ->
-            val normT = normalizeTitleForGrouping(rel.title)
-            val normA = rel.authors.split(",").firstOrNull()?.lowercase(Locale.US)
-                ?.replace(Regex("[^a-z0-9]"), "") ?: ""
-            "${normT}_${normA}"
-        }
-
-        val filterPrefs = getPrefs()
-        val todayIso = LocalDate.now().toString()
-        val recentCutoffIso = LocalDate.now().minusDays(30).toString()
-
-        val dndBooks = dndRules.filter { it.targetType == DndTargetType.BOOK }
-            .map { it.targetKey.lowercase(Locale.US) }.toSet()
-        val dndSeries = dndRules.filter { it.targetType == DndTargetType.SERIES }
-            .map { it.targetKey.lowercase(Locale.US) }.toSet()
-
-        val fetchedPairs = coroutineScope {
-            tracked.map { item ->
-                async {
-                    syncSemaphore.withPermit {
-                        val results = when (item.type) {
-                            TrackType.AUTHOR -> AudibleApiClient.searchCatalog(
-                                author = item.queryValue,
-                                maxPages = 3,
-                                forceRefresh = forceRefresh
-                            )
-                            TrackType.NARRATOR -> AudibleApiClient.searchCatalog(
-                                narrator = item.queryValue,
-                                maxPages = 2,
-                                forceRefresh = forceRefresh
-                            )
-                            TrackType.SERIES -> AudibleApiClient.searchCatalog(
-                                titleOrSeries = item.queryValue,
-                                maxPages = 2,
-                                forceRefresh = forceRefresh
-                            )
-                            TrackType.BOOK -> AudibleApiClient.searchCatalog(
-                                asin = item.externalId ?: item.queryValue,
-                                titleOrSeries = item.queryValue,
-                                maxPages = 1,
-                                forceRefresh = forceRefresh
-                            )
-                        }
-                        item to results
-                    }
-                }
-            }.awaitAll()
-        }
-
-        val assignedThumbnails = tracked.mapNotNull { it.thumbnailUrl.takeIf { u -> u.isNotBlank() } }.toMutableSet()
-        val bookCoversSet = fetchedPairs.flatMap { it.second }.mapNotNull { it.coverUrl.takeIf { u -> u.isNotBlank() } }.toSet()
-
-        for ((item, results) in fetchedPairs) {
-            val canonicalName = when (item.type) {
-                TrackType.AUTHOR -> {
-                    results.flatMap { it.authors }
-                        .firstOrNull { it.equals(item.queryValue, ignoreCase = true) }
-                        ?: AudibleApiClient.formatCanonicalName(item.queryValue)
-                }
-                TrackType.SERIES -> {
-                    results.map { it.seriesTitle }
-                        .firstOrNull { it.equals(item.queryValue, ignoreCase = true) }
-                        ?: AudibleApiClient.formatCanonicalName(item.queryValue)
-                }
-                TrackType.NARRATOR -> {
-                    results.flatMap { it.narrators }
-                        .firstOrNull { it.equals(item.queryValue, ignoreCase = true) }
-                        ?: AudibleApiClient.formatCanonicalName(item.queryValue)
-                }
-                TrackType.BOOK -> item.queryValue
-            }
-
-            val isAuthorShowingBookCover = item.type == TrackType.AUTHOR && (
-                item.thumbnailUrl.isBlank() ||
-                    item.thumbnailUrl in bookCoversSet ||
-                    (!item.thumbnailUrl.contains("amzn-author-media", ignoreCase = true) &&
-                        !item.thumbnailUrl.contains("ssl-images-amazon", ignoreCase = true))
-            )
-
-            val discoveredAuthorAsin = item.externalId?.takeIf { it.isNotBlank() }
-                ?: results.firstOrNull { prod ->
-                    prod.primaryAuthorAsin.isNotBlank() &&
-                        prod.authors.firstOrNull()?.contains(item.queryValue.trim(), ignoreCase = true) == true
-                }?.primaryAuthorAsin
-                ?: results.firstOrNull { it.primaryAuthorAsin.isNotBlank() }?.primaryAuthorAsin
-
-            var updatedThumb = item.thumbnailUrl
-            if (item.thumbnailUrl.isBlank() || isAuthorShowingBookCover) {
-                val portrait = when (item.type) {
-                    TrackType.AUTHOR -> AudibleApiClient.fetchAudibleAuthorImageUrl(canonicalName, discoveredAuthorAsin)
-                    TrackType.NARRATOR -> AudibleApiClient.fetchNarratorPortraitUrl(canonicalName)
-                    else -> null
-                }
-                if (!portrait.isNullOrBlank()) {
-                    updatedThumb = portrait
-                } else if (updatedThumb.isBlank()) {
-                    val availableCovers = results.mapNotNull { it.coverUrl.takeIf { u -> u.isNotBlank() } }
-                    updatedThumb = availableCovers.firstOrNull { it !in assignedThumbnails }
-                        ?: availableCovers.firstOrNull().orEmpty()
->>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
                 }
             }
-
-            if (updatedThumb != item.thumbnailUrl || canonicalName != item.queryValue || (discoveredAuthorAsin != null && discoveredAuthorAsin != item.externalId)) {
-                if (updatedThumb.isNotBlank()) assignedThumbnails.add(updatedThumb)
-                dao.updateTrackedItemDetails(
-                    id = item.id,
-                    queryValue = canonicalName,
-                    extId = discoveredAuthorAsin ?: item.externalId,
-                    url = updatedThumb
-                )
-            }
         }
 
-<<<<<<< HEAD
         prefs.edit().putLong("last_abb_check_ms", nowMs).apply()
         return dao.getAllReleases()
     }
@@ -669,8 +493,6 @@ class ReleaseRepository(context: Context) {
             }
         }
 
-=======
->>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
         val trackedSeriesLastRead = tracked.filter { it.type == TrackType.SERIES }
             .associate { it.queryValue.lowercase(Locale.US) to it.lastReadSequence }
 
@@ -678,7 +500,6 @@ class ReleaseRepository(context: Context) {
 
         for ((item, results) in fetchedPairs) {
             val qNorm = item.queryValue.trim()
-<<<<<<< HEAD
             val effExt = effectiveExternalIds[item.id] ?: item.externalId
             val pinnedAsin = effExt?.substringBefore("|")?.trim().orEmpty()
             val pinnedAuthor = if (effExt?.contains("|") == true) effExt.substringAfter("|").trim() else ""
@@ -710,48 +531,22 @@ class ReleaseRepository(context: Context) {
                         // Item #4: Strict word-boundary author matching
                         val authorMatches = prod.authors.take(2).any { a ->
                             matchesPersonNameExactOrWordBoundary(a, qNorm)
-=======
-            for (prod in results) {
-                when (item.type) {
-                    TrackType.SERIES -> {
-                        val seriesMatches = prod.seriesTitle.isNotBlank() &&
-                            prod.seriesTitle.contains(qNorm, ignoreCase = true)
-                        val numberedTitleMatches = prod.seriesTitle.isBlank() &&
-                            prod.title.startsWith(qNorm, ignoreCase = true) &&
-                            prod.authors.isNotEmpty()
-                        if (!seriesMatches && !numberedTitleMatches) continue
-                    }
-                    TrackType.AUTHOR -> {
-                        val authorMatches = prod.authors.take(2).any { a ->
-                            a.equals(qNorm, ignoreCase = true) || a.contains(qNorm, ignoreCase = true)
->>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
                         }
                         if (!authorMatches) continue
                     }
                     TrackType.NARRATOR -> {
-<<<<<<< HEAD
                         // Item #4: Strict word-boundary narrator matching
                         val narratorMatches = prod.narrators.any { n ->
                             matchesPersonNameExactOrWordBoundary(n, qNorm)
-=======
-                        val narratorMatches = prod.narrators.any { n ->
-                            n.equals(qNorm, ignoreCase = true) || n.contains(qNorm, ignoreCase = true)
->>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
                         }
                         if (!narratorMatches) continue
                     }
                     TrackType.BOOK -> {
-<<<<<<< HEAD
                         val asinMatches = (pinnedAsin.isNotBlank() && prod.asin.equals(pinnedAsin, ignoreCase = true)) ||
                             prod.asin.equals(qNorm, ignoreCase = true)
                         val titleAndAuthorMatches = prod.title.equals(qNorm, ignoreCase = true) &&
                             (pinnedAuthor.isBlank() || prod.authors.any { a -> matchesPersonNameExactOrWordBoundary(a, pinnedAuthor) })
                         if (!asinMatches && !titleAndAuthorMatches) continue
-=======
-                        val bookMatches = prod.asin.equals(qNorm, ignoreCase = true) ||
-                            prod.title.contains(qNorm, ignoreCase = true)
-                        if (!bookMatches) continue
->>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
                     }
                 }
 
@@ -765,11 +560,7 @@ class ReleaseRepository(context: Context) {
                 if (prod.seriesTitle.isNotBlank() && prod.seriesSequence != null && prod.releaseDateIso > todayIso) {
                     val sKey = prod.seriesTitle.trim().lowercase(Locale.US)
                     val userLastRead = trackedSeriesLastRead.entries
-<<<<<<< HEAD
                         .firstOrNull { (k, _) -> sKey.equals(k, ignoreCase = true) || sKey.contains(k) }?.value ?: 0
-=======
-                        .firstOrNull { (k, _) -> sKey.contains(k) || k.contains(sKey) }?.value ?: 0
->>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
                     if (userLastRead > 0 && prod.seriesSequence <= userLastRead) {
                         continue
                     }
@@ -817,20 +608,12 @@ class ReleaseRepository(context: Context) {
 
             val newNarratorsStr = prod.narrators.joinToString(", ").ifBlank { "TBA" }
 
-<<<<<<< HEAD
-=======
-            // 2. Release Date Shift & Delay Detector
->>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
             val shiftedFromDate = when {
                 prev == null -> ""
                 prev.releaseDateIso != prod.releaseDateIso && prev.releaseDateIso.isNotBlank() -> prev.releaseDateIso
                 else -> prev.previousReleaseDateIso
             }
 
-<<<<<<< HEAD
-=======
-            // 3. Narrator TBA -> Announced Detector
->>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
             val narratorNewlyAnnounced = when {
                 prev == null -> false
                 prev.narrators.equals("TBA", ignoreCase = true) && !newNarratorsStr.equals("TBA", ignoreCase = true) -> true
@@ -861,7 +644,6 @@ class ReleaseRepository(context: Context) {
                 publisher = prod.publisher,
                 altAsins = group.editionAsins.joinToString(","),
                 previousReleaseDateIso = shiftedFromDate,
-<<<<<<< HEAD
                 narratorJustAnnounced = narratorNewlyAnnounced,
                 abbAvailable = prev?.abbAvailable ?: false,
                 abbPostUrl = prev?.abbPostUrl ?: "",
@@ -870,13 +652,6 @@ class ReleaseRepository(context: Context) {
             )
         }
 
-=======
-                narratorJustAnnounced = narratorNewlyAnnounced
-            )
-        }
-
-        // If every single request failed with no cached fallback and we already had releases in DB, preserve existing DB
->>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
         val errCount = AudibleApiClient.syncNetworkErrorCount.get()
         val staleCount = AudibleApiClient.syncUsedStaleCacheCount.get()
         if (finalEntities.isEmpty() && existingReleases.isNotEmpty() && errCount > 0) {
@@ -894,13 +669,9 @@ class ReleaseRepository(context: Context) {
             errorCount = errCount,
             usedCachedFallback = staleCount > 0
         )
-<<<<<<< HEAD
 
         // Item #2: Run throttled daily AudioBookBay availability check for released books
         return checkPendingAbbReleases(forceAbbCheck = forceRefresh)
-=======
-        return dao.getAllReleases()
->>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
     }
 
     suspend fun muteBook(asin: String, title: String) {

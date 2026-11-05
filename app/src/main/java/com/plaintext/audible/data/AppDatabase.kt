@@ -95,11 +95,7 @@ interface TrackerDao {
 
 @Database(
     entities = [TrackedItemEntity::class, DndRuleEntity::class, ReleaseEntity::class],
-<<<<<<< HEAD
     version = 6,
-=======
-    version = 5,
->>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -145,7 +141,6 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
-<<<<<<< HEAD
         private val MIGRATION_5_6 = object : Migration(5, 6) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE releases ADD COLUMN abbAvailable INTEGER NOT NULL DEFAULT 0")
@@ -155,8 +150,6 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
-=======
->>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
         fun get(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 Room.databaseBuilder(
@@ -164,11 +157,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "plaintext_audible.db"
                 )
-<<<<<<< HEAD
                     .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
-=======
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
->>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
                     .fallbackToDestructiveMigration()
                     .build()
                     .also { INSTANCE = it }
