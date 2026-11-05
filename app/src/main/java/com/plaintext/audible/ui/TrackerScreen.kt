@@ -1957,7 +1957,7 @@ private fun AboutPageView(onBack: () -> Unit) {
                     bold = true
                 )
                 MonoText(
-                    text = "Version 2.6.0 • Plain-Text Audiobook Release Tracker",
+                    text = "Version 2.7.0 • Plain-Text Audiobook Release Tracker",
                     color = palette.cyan,
                     fontSizeSp = 12,
                     bold = true

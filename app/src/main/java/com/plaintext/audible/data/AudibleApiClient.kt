@@ -75,7 +75,13 @@ object AudibleApiClient {
     private val ABB_MIRRORS = listOf(
         "https://audiobookbay.lu",
         "https://audiobookbay.is",
-        "https://audiobookbay.fi"
+        "https://audiobookbay.fi",
+        "https://theaudiobookbay.se"
+    )
+
+    private val STOP_WORDS = setOf(
+        "the", "and", "with", "for", "from", "into", "that", "this", "who", "what",
+        "when", "where", "why", "how", "book", "volume", "vol", "part", "series", "novel", "audiobook"
     )
 
     private val memoryCache = object : LruCache<String, List<CatalogProduct>>(140) {}
@@ -166,80 +172,166 @@ object AudibleApiClient {
     }
 
     /**
-     * Checks AudioBookBay for a released audiobook by querying title + primary author,
-     * verifying that the post link title matches both the core book title and author surname,
-     * and extracting the 40-char BitTorrent Info Hash to construct a ready-to-use magnet URI.
+     * Checks AudioBookBay for a released audiobook (`He Who Fights with Monsters 13`, etc.):
+     * 1) Searches by the clean core book title (`?s=he+who+fights+with+monsters+13`) so dual pen-names
+     *    (`Shirtaloon` vs `Travis Deverell`) don't cause ABB's strict keyword search to return 0 results.
+     * 2) Sends `Origin`, `Referer`, and `Sec-Fetch-*` headers required by ABB's anti-bot filter.
+     * 3) Parses `<div class="postTitle">...<a href="...">Title</a>` and `<h2><a href="...">Title</a>` blocks
+     *    (supporting both `/audio-books/...` and `/abss/...` URLs and nested tags).
+     * 4) Verifies that significant title words + any sequence number match the post title, and that at least
+     *    one author or narrator token (e.g. `shirtaloon`, `deverell`, or `miller`) appears in the post block.
+     * 5) Extracts the 40-char BitTorrent Info Hash from the matched post page to build a ready-to-use `magnet:` URI.
      */
     suspend fun checkAudioBookBayAvailability(
         bookTitle: String,
-        primaryAuthor: String
+        allAuthors: String,
+        allNarrators: String = "",
+        seriesTitle: String = "",
+        seriesSequence: Int? = null
     ): AbbMatchResult = withContext(Dispatchers.IO) {
         val coreTitle = bookTitle
             .substringBefore(":")
             .replace(Regex("\\(.*?\\)"), "")
             .replace(Regex("\\[.*?\\]"), "")
+            .replace(Regex("\\s+"), " ")
             .trim()
-        val authorSurname = primaryAuthor.trim().split(" ").lastOrNull()?.trim().orEmpty()
         if (coreTitle.isBlank()) return@withContext AbbMatchResult(false)
 
-        val queryRaw = "$coreTitle ${primaryAuthor.trim()}".trim().lowercase(Locale.US)
-        val encodedQuery = URLEncoder.encode(queryRaw, "UTF-8")
+        val titleNumbers = Regex("\\b(\\d+)\\b").findAll(coreTitle)
+            .map { it.groupValues[1] }
+            .toMutableSet()
+        if (seriesSequence != null && seriesSequence > 0) {
+            titleNumbers.add(seriesSequence.toString())
+        }
 
-        val postLinkRegex = Regex(
-            "<a\\s+[^>]*href=[\"'](/audio-books/[^\"'#?]+)[\"'][^>]*>([^<]+)</a>",
-            RegexOption.IGNORE_CASE
+        val significantTitleWords = coreTitle.lowercase(Locale.US)
+            .split(Regex("[^a-z0-9]+"))
+            .filter { it.length >= 4 && it !in STOP_WORDS && !it.all { ch -> ch.isDigit() } }
+
+        // Build candidate contributor tokens from all authors and narrators (e.g. ["shirtaloon", "travis", "deverell", "heath", "miller"])
+        val contributorTokens = "$allAuthors, $allNarrators"
+            .lowercase(Locale.US)
+            .split(Regex("[^a-z0-9]+"))
+            .filter { it.length >= 4 && it !in STOP_WORDS }
+            .toSet()
+
+        val primaryAuthorFirst = allAuthors.split(",").firstOrNull()?.trim().orEmpty()
+
+        // Try clean coreTitle query first (most reliable on ABB), then fallback to coreTitle + primaryAuthor
+        val candidateQueries = linkedSetOf<String>()
+        candidateQueries.add(coreTitle.lowercase(Locale.US))
+        if (seriesTitle.isNotBlank() && seriesSequence != null) {
+            candidateQueries.add("${seriesTitle.trim()} $seriesSequence".lowercase(Locale.US))
+        }
+        if (primaryAuthorFirst.isNotBlank()) {
+            candidateQueries.add("$coreTitle $primaryAuthorFirst".lowercase(Locale.US))
+        }
+
+        // Matches <div class="postTitle"><h2><a href="...">...</a></h2></div> OR <h2><a href="...">...</a></h2>
+        val h2LinkRegex = Regex(
+            "<h[12][^>]*>\\s*<a\\s+[^>]*href=[\"']([^\"'#?]+)[\"'][^>]*>(.*?)</a>\\s*</h[12]>",
+            setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+        )
+        val fallbackBookLinkRegex = Regex(
+            "<a\\s+[^>]*href=[\"']((?:https?://[^\"'/]+)?/(?:audio-books|abss)/[^\"'#?]+)[\"'][^>]*>(.*?)</a>",
+            setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
         )
         val infoHashRegex = Regex(
-            "Info\\s*Hash\\s*:?\\s*</td>\\s*<td[^>]*>\\s*([a-fA-F0-9]{40})\\s*</td>",
+            "Info\\s*Hash\\s*:?\\s*</t[dh]>\\s*<td[^>]*>\\s*([a-fA-F0-9]{40})\\s*</td>",
             setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
         )
         val fallbackHashRegex = Regex("\\b([a-fA-F0-9]{40})\\b")
 
-        val requiredTitleWords = coreTitle.lowercase(Locale.US)
-            .split(Regex("[^a-z0-9]+"))
-            .filter { it.length >= 3 || it.all { ch -> ch.isDigit() } }
-
         for (mirror in ABB_MIRRORS) {
-            val searchUrl = URL("$mirror/?s=$encodedQuery&cat=undefined%2Cundefined")
-            val searchHtml = executeGetWithRetry(searchUrl, acceptHtml = true) ?: continue
+            var mirrorResponded = false
+            for (qRaw in candidateQueries) {
+                val encodedQ = URLEncoder.encode(qRaw, "UTF-8")
+                val searchUrl = URL("$mirror/?s=$encodedQ")
+                val searchHtml = executeGetWithRetry(
+                    url = searchUrl,
+                    acceptHtml = true,
+                    originUrl = mirror
+                ) ?: continue
 
-            for (match in postLinkRegex.findAll(searchHtml)) {
-                val relHref = match.groupValues.getOrNull(1).orEmpty()
-                val linkText = HtmlCompat.fromHtml(
-                    match.groupValues.getOrNull(2).orEmpty(),
-                    HtmlCompat.FROM_HTML_MODE_COMPACT
-                ).toString().lowercase(Locale.US)
-
-                val titleMatches = requiredTitleWords.isNotEmpty() && requiredTitleWords.all { w ->
-                    linkText.contains(w)
+                if (searchHtml.contains("<html", ignoreCase = true)) {
+                    mirrorResponded = true
                 }
-                val authorMatches = authorSurname.length < 3 || linkText.contains(authorSurname.lowercase(Locale.US))
 
-                if (titleMatches && authorMatches && relHref.isNotBlank()) {
-                    val fullPostUrl = if (relHref.startsWith("http")) relHref else "$mirror$relHref"
-                    var magnetUri = ""
+                val linkMatches = h2LinkRegex.findAll(searchHtml).toList().ifEmpty {
+                    fallbackBookLinkRegex.findAll(searchHtml).toList()
+                }
 
-                    // Fetch the matched ABB post page to extract the 40-char Info Hash
-                    val postHtml = executeGetWithRetry(URL(fullPostUrl), acceptHtml = true)
-                    if (postHtml != null) {
-                        val hash = infoHashRegex.find(postHtml)?.groupValues?.getOrNull(1)
-                            ?: fallbackHashRegex.find(postHtml)?.groupValues?.getOrNull(1)
-                            ?: ""
-                        if (hash.length == 40) {
-                            val dn = URLEncoder.encode("$coreTitle - $primaryAuthor", "UTF-8")
-                            magnetUri = "magnet:?xt=urn:btih:${hash.lowercase(Locale.US)}&dn=$dn"
-                        }
+                for (match in linkMatches) {
+                    val rawHref = match.groupValues.getOrNull(1)?.trim().orEmpty()
+                    if (rawHref.isBlank() || rawHref == "/" || rawHref.contains("/page/") || rawHref.contains("/category/")) {
+                        continue
                     }
 
-                    return@withContext AbbMatchResult(
-                        available = true,
-                        postUrl = fullPostUrl,
-                        magnetUri = magnetUri
-                    )
+                    val rawAnchorHtml = match.groupValues.getOrNull(2).orEmpty()
+                    val linkTitle = HtmlCompat.fromHtml(rawAnchorHtml, HtmlCompat.FROM_HTML_MODE_COMPACT)
+                        .toString()
+                        .lowercase(Locale.US)
+
+                    // Surrounding 1200 chars of the post card on the search results page (contains Category, Author, Narrator, Language)
+                    val windowStart = match.range.first.coerceAtLeast(0)
+                    val windowEnd = (match.range.last + 1200).coerceAtMost(searchHtml.length)
+                    val postContextLower = HtmlCompat.fromHtml(
+                        searchHtml.substring(windowStart, windowEnd),
+                        HtmlCompat.FROM_HTML_MODE_COMPACT
+                    ).toString().lowercase(Locale.US)
+
+                    // 1. Check that significant title words appear in the post title
+                    val matchedWordCount = significantTitleWords.count { w -> linkTitle.contains(w) }
+                    val requiredWordCount = if (significantTitleWords.size >= 2) {
+                        (significantTitleWords.size - 1).coerceAtLeast(1)
+                    } else {
+                        significantTitleWords.size
+                    }
+                    val wordsMatch = significantTitleWords.isEmpty() || matchedWordCount >= requiredWordCount
+
+                    // 2. If the book has a number (e.g. "13" in "He Who Fights with Monsters 13"), require that exact number as a word boundary
+                    val numbersMatch = titleNumbers.all { num ->
+                        val padded = num.padStart(2, '0')
+                        Regex("\\b(?:$num|$padded)\\b").containsMatchIn(linkTitle)
+                    }
+
+                    // 3. Check that at least one contributor token (e.g. "shirtaloon" OR "deverell" OR "miller") appears in the title or post block
+                    val contributorMatches = contributorTokens.isEmpty() || contributorTokens.any { tok ->
+                        linkTitle.contains(tok) || postContextLower.contains(tok)
+                    }
+
+                    if (wordsMatch && numbersMatch && contributorMatches) {
+                        val fullPostUrl = when {
+                            rawHref.startsWith("http") -> rawHref
+                            rawHref.startsWith("/") -> "$mirror$rawHref"
+                            else -> "$mirror/$rawHref"
+                        }
+
+                        var magnetUri = ""
+                        val postHtml = executeGetWithRetry(
+                            url = URL(fullPostUrl),
+                            acceptHtml = true,
+                            originUrl = mirror
+                        )
+                        if (postHtml != null) {
+                            val hash = infoHashRegex.find(postHtml)?.groupValues?.getOrNull(1)
+                                ?: fallbackHashRegex.find(postHtml)?.groupValues?.getOrNull(1)
+                                ?: ""
+                            if (hash.length == 40) {
+                                val dn = URLEncoder.encode("$coreTitle - $primaryAuthorFirst", "UTF-8")
+                                magnetUri = "magnet:?xt=urn:btih:${hash.lowercase(Locale.US)}&dn=$dn"
+                            }
+                        }
+
+                        return@withContext AbbMatchResult(
+                            available = true,
+                            postUrl = fullPostUrl,
+                            magnetUri = magnetUri
+                        )
+                    }
                 }
             }
-            // If the first mirror responded with valid HTML (even with 0 matches), don't hit backup mirrors
-            if (searchHtml.contains("<html", ignoreCase = true)) {
+            if (mirrorResponded) {
                 break
             }
         }
@@ -545,7 +637,11 @@ object AudibleApiClient {
         return freshJson
     }
 
-    private suspend fun executeGetWithRetry(url: URL, acceptHtml: Boolean = false): String? {
+    private suspend fun executeGetWithRetry(
+        url: URL,
+        acceptHtml: Boolean = false,
+        originUrl: String? = null
+    ): String? {
         repeat(2) { attempt ->
             var shouldRetry = false
             val conn = (url.openConnection() as HttpURLConnection).apply {
@@ -553,15 +649,26 @@ object AudibleApiClient {
                 requestMethod = "GET"
                 connectTimeout = 10_000
                 readTimeout = 10_000
-                setRequestProperty("Accept", if (acceptHtml) "text/html,application/xhtml+xml" else "application/json")
+                setRequestProperty(
+                    "Accept",
+                    if (acceptHtml) "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" else "application/json"
+                )
                 setRequestProperty("Accept-Language", "en-US,en;q=0.9")
                 setRequestProperty("Accept-Encoding", "gzip")
+                if (originUrl != null) {
+                    setRequestProperty("Origin", originUrl)
+                    setRequestProperty("Referer", "$originUrl/")
+                    setRequestProperty("Upgrade-Insecure-Requests", "1")
+                    setRequestProperty("Sec-Fetch-Dest", "document")
+                    setRequestProperty("Sec-Fetch-Mode", "navigate")
+                    setRequestProperty("Sec-Fetch-Site", "same-origin")
+                }
                 setRequestProperty(
                     "User-Agent",
                     if (acceptHtml) {
-                        "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+                        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
                     } else {
-                        "NocturneTXT/2.6 (Android)"
+                        "NocturneTXT/2.7 (Android)"
                     }
                 )
             }

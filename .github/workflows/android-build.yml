@@ -38,7 +38,7 @@ jobs:
       - name: Upload Optimized APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nocturnetxt-v2.6-apk
+          name: nocturnetxt-v2.7-apk
           overwrite: true
           path: |
             app/build/outputs/apk/release/app-release.apk

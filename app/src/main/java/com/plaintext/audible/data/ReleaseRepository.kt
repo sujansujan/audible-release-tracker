@@ -219,10 +219,6 @@ class ReleaseRepository(context: Context) {
             .replace(Regex("[^a-z0-9]"), "")
     }
 
-    /**
-     * Exact word-boundary name check so short names (e.g. "Actus" or "Will")
-     * never match inside longer unrelated names.
-     */
     private fun matchesPersonNameExactOrWordBoundary(candidateName: String, targetQuery: String): Boolean {
         val cand = candidateName.trim()
         val target = targetQuery.trim()
@@ -273,9 +269,33 @@ class ReleaseRepository(context: Context) {
     }
 
     /**
+     * Checks a single release on AudioBookBay on demand (when user taps `[ Check ABB ]` on a card).
+     */
+    suspend fun checkSingleReleaseOnAbb(rel: ReleaseEntity): Boolean {
+        return abbSemaphore.withPermit {
+            val match = AudibleApiClient.checkAudioBookBayAvailability(
+                bookTitle = rel.title,
+                allAuthors = rel.authors,
+                allNarrators = rel.narrators,
+                seriesTitle = rel.seriesTitle,
+                seriesSequence = rel.seriesSequence
+            )
+            if (match.available) {
+                dao.updateAbbAvailability(
+                    asin = rel.asin,
+                    available = true,
+                    postUrl = match.postUrl,
+                    magnetUri = match.magnetUri
+                )
+            }
+            match.available
+        }
+    }
+
+    /**
      * Sequentially checks AudioBookBay at most once per day (or when forceAbbCheck = true)
-     * for already-released books (`releaseDateIso <= today`) that are not yet marked `abbAvailable`.
-     * Uses `Semaphore(1)` + `1500ms` spacing between requests so ABB never rate-limits the app.
+     * for already-released books (`releaseDateIso <= today`) sorted newest-first so recent
+     * releases (like He Who Fights with Monsters 13) are always checked first.
      */
     suspend fun checkPendingAbbReleases(forceAbbCheck: Boolean = false): List<ReleaseEntity> {
         val filterPrefs = getPrefs()
@@ -288,9 +308,11 @@ class ReleaseRepository(context: Context) {
         }
 
         val todayIso = LocalDate.now().toString()
-        val candidates = dao.getAllReleases().filter { rel ->
-            !rel.abbAvailable && rel.releaseDateIso != "TBA" && rel.releaseDateIso <= todayIso
-        }
+        val candidates = dao.getAllReleases()
+            .filter { rel ->
+                !rel.abbAvailable && rel.releaseDateIso != "TBA" && rel.releaseDateIso <= todayIso
+            }
+            .sortedByDescending { it.releaseDateIso }
 
         if (candidates.isEmpty()) {
             prefs.edit().putLong("last_abb_check_ms", nowMs).apply()
@@ -298,12 +320,17 @@ class ReleaseRepository(context: Context) {
         }
 
         abbSemaphore.withPermit {
-            for ((index, rel) in candidates.take(8).withIndex()) {
+            for ((index, rel) in candidates.take(10).withIndex()) {
                 if (index > 0) {
-                    delay(1500L)
+                    delay(1400L)
                 }
-                val primaryAuthor = rel.authors.split(",").firstOrNull()?.trim().orEmpty()
-                val match = AudibleApiClient.checkAudioBookBayAvailability(rel.title, primaryAuthor)
+                val match = AudibleApiClient.checkAudioBookBayAvailability(
+                    bookTitle = rel.title,
+                    allAuthors = rel.authors,
+                    allNarrators = rel.narrators,
+                    seriesTitle = rel.seriesTitle,
+                    seriesSequence = rel.seriesSequence
+                )
                 if (match.available) {
                     dao.updateAbbAvailability(
                         asin = rel.asin,
@@ -389,8 +416,6 @@ class ReleaseRepository(context: Context) {
 
         val assignedThumbnails = tracked.mapNotNull { it.thumbnailUrl.takeIf { u -> u.isNotBlank() } }.toMutableSet()
         val bookCoversSet = fetchedPairs.flatMap { it.second }.mapNotNull { it.coverUrl.takeIf { u -> u.isNotBlank() } }.toSet()
-
-        // Also build a map of effective pinned externalId per tracked item so same-name series collisions are blocked
         val effectiveExternalIds = mutableMapOf<Long, String?>()
 
         for ((item, results) in fetchedPairs) {
@@ -413,7 +438,6 @@ class ReleaseRepository(context: Context) {
                 TrackType.BOOK -> item.queryValue
             }
 
-            // Auto-pin SERIES and BOOK items to their canonical seriesAsin + primary author if not already pinned
             val updatedExtId: String? = when (item.type) {
                 TrackType.SERIES -> {
                     if (!item.externalId.isNullOrBlank() && item.externalId.contains("|")) {
@@ -507,7 +531,6 @@ class ReleaseRepository(context: Context) {
             for (prod in results) {
                 when (item.type) {
                     TrackType.SERIES -> {
-                        // Item #1: Strict Series-Author & ASIN Pinning so same-name series by other authors never match
                         val asinExactMatch = pinnedAsin.isNotBlank() &&
                             prod.seriesAsin.isNotBlank() &&
                             prod.seriesAsin.equals(pinnedAsin, ignoreCase = true)
@@ -528,14 +551,12 @@ class ReleaseRepository(context: Context) {
                         }
                     }
                     TrackType.AUTHOR -> {
-                        // Item #4: Strict word-boundary author matching
                         val authorMatches = prod.authors.take(2).any { a ->
                             matchesPersonNameExactOrWordBoundary(a, qNorm)
                         }
                         if (!authorMatches) continue
                     }
                     TrackType.NARRATOR -> {
-                        // Item #4: Strict word-boundary narrator matching
                         val narratorMatches = prod.narrators.any { n ->
                             matchesPersonNameExactOrWordBoundary(n, qNorm)
                         }
@@ -670,7 +691,6 @@ class ReleaseRepository(context: Context) {
             usedCachedFallback = staleCount > 0
         )
 
-        // Item #2: Run throttled daily AudioBookBay availability check for released books
         return checkPendingAbbReleases(forceAbbCheck = forceRefresh)
     }
 
