@@ -35,11 +35,21 @@ class ReleaseCheckWorker(
             val daysUntil = ChronoUnit.DAYS.between(today, relDate)
 
             if (daysUntil == 7L && !rel.notifiedSevenDay) {
-                sendReleaseNotification(rel, domain, isReleaseDay = false)
+                sendReleaseNotification(rel, domain, tag = "[T-7 DAYS]", targetUrl = null)
                 repo.dao.updateNotificationFlags(rel.asin, sevenDay = true, releaseDay = rel.notifiedReleaseDay)
             } else if (daysUntil == 0L && !rel.notifiedReleaseDay) {
-                sendReleaseNotification(rel, domain, isReleaseDay = true)
+                sendReleaseNotification(rel, domain, tag = "[OUT TODAY]", targetUrl = null)
                 repo.dao.updateNotificationFlags(rel.asin, sevenDay = rel.notifiedSevenDay, releaseDay = true)
+            }
+
+            if (rel.abbAvailable && !rel.notifiedAbbAvailable) {
+                sendReleaseNotification(
+                    rel = rel,
+                    domain = domain,
+                    tag = "[ON ABB]",
+                    targetUrl = rel.abbPostUrl.ifBlank { null }
+                )
+                repo.dao.updateAbbNotifiedFlag(rel.asin, notified = true)
             }
         }
         return Result.success()
@@ -49,30 +59,36 @@ class ReleaseCheckWorker(
         val nm = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "Release Alerts (T-7d & T-0d)",
+            "Release & ABB Alerts (T-7d, T-0d, ABB)",
             NotificationManager.IMPORTANCE_DEFAULT
         ).apply {
-            description = "Notifications 1 week before and on release day for tracked audiobooks"
+            description = "Notifications 1 week before, on release day, and when found on AudioBookBay"
         }
         nm.createNotificationChannel(channel)
     }
 
-    private fun sendReleaseNotification(rel: ReleaseEntity, domain: String, isReleaseDay: Boolean) {
+    private fun sendReleaseNotification(
+        rel: ReleaseEntity,
+        domain: String,
+        tag: String,
+        targetUrl: String?
+    ) {
         val nm = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val notifId = rel.asin.hashCode()
+        val notifId = (rel.asin + tag).hashCode()
 
-        val tag = if (isReleaseDay) "[OUT TODAY]" else "[T-7 DAYS]"
         val title = "$tag ${rel.title}"
         val seriesPart = if (rel.seriesTitle.isNotBlank()) " (${rel.seriesTitle})" else ""
         val body = "By ${rel.authors} • Narrated by ${rel.narrators}$seriesPart"
 
-        val query = URLEncoder.encode("${rel.title} ${rel.authors.split(",").firstOrNull().orEmpty()}", "UTF-8")
-        val searchUrl = "https://www.$domain/search?keywords=$query&ipRedirectOverride=true&overrideBaseCountry=true"
-        val audibleIntent = Intent(Intent.ACTION_VIEW, Uri.parse(searchUrl))
+        val url = targetUrl ?: run {
+            val query = URLEncoder.encode("${rel.title} ${rel.authors.split(",").firstOrNull().orEmpty()}", "UTF-8")
+            "https://www.$domain/search?keywords=$query&ipRedirectOverride=true&overrideBaseCountry=true"
+        }
+        val viewIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
         val contentPending = PendingIntent.getActivity(
             applicationContext,
             notifId,
-            audibleIntent,
+            viewIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 

@@ -26,7 +26,15 @@ data class TrackedItemEntity(
     val lastReadSequence: Int = 0,
     val createdAt: Long = System.currentTimeMillis(),
     val thumbnailUrl: String = ""
-)
+) {
+    val pinnedAsin: String
+        get() = externalId?.substringBefore("|")?.trim().orEmpty()
+
+    val pinnedAuthor: String
+        get() = if (externalId?.contains("|") == true) {
+            externalId.substringAfter("|").trim()
+        } else ""
+}
 
 @Immutable
 @Entity(tableName = "dnd_rules")
@@ -61,5 +69,11 @@ data class ReleaseEntity(
     val synopsis: String = "",
     val runtimeMinutes: Int = 0,
     val publisher: String = "",
-    val altAsins: String = ""
+    val altAsins: String = "",
+    val previousReleaseDateIso: String = "",
+    val narratorJustAnnounced: Boolean = false,
+    val abbAvailable: Boolean = false,
+    val abbPostUrl: String = "",
+    val abbMagnetUri: String = "",
+    val notifiedAbbAvailable: Boolean = false
 )

@@ -25,11 +25,17 @@ interface TrackerDao {
     @Delete
     suspend fun deleteTrackedItem(item: TrackedItemEntity)
 
+    @Query("DELETE FROM tracked_items WHERE id = :id")
+    suspend fun deleteTrackedItemById(id: Long)
+
     @Query("UPDATE tracked_items SET lastReadSequence = :seq WHERE id = :id")
     suspend fun updateSeriesReadSequence(id: Long, seq: Int)
 
     @Query("UPDATE tracked_items SET thumbnailUrl = :url WHERE id = :id")
     suspend fun updateTrackedItemThumbnail(id: Long, url: String)
+
+    @Query("UPDATE tracked_items SET queryValue = :queryValue, externalId = :extId, thumbnailUrl = :url WHERE id = :id")
+    suspend fun updateTrackedItemDetails(id: Long, queryValue: String, extId: String?, url: String)
 
     @Query("SELECT * FROM dnd_rules ORDER BY createdAt DESC")
     fun observeDndRules(): Flow<List<DndRuleEntity>>
@@ -58,22 +64,38 @@ interface TrackerDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertReleases(releases: List<ReleaseEntity>)
 
+    @Transaction
+    suspend fun replaceSyncedReleases(releases: List<ReleaseEntity>) {
+        if (releases.isEmpty()) {
+            clearAllReleases()
+        } else {
+            upsertReleases(releases)
+            deleteReleasesNotIn(releases.map { it.asin })
+        }
+    }
+
     @Query("DELETE FROM releases WHERE asin = :asin")
     suspend fun deleteReleaseByAsin(asin: String)
 
     @Query("DELETE FROM releases WHERE LOWER(seriesTitle) = LOWER(:seriesKey) OR seriesAsin = :seriesKey")
     suspend fun deleteReleasesBySeries(seriesKey: String)
 
-    @Query("UPDATE releases SET isNewDiscovery = 0 WHERE isNewDiscovery = 1")
+    @Query("UPDATE releases SET isNewDiscovery = 0, narratorJustAnnounced = 0 WHERE isNewDiscovery = 1 OR narratorJustAnnounced = 1")
     suspend fun clearNewDiscoveryFlags()
 
     @Query("UPDATE releases SET notifiedSevenDay = :sevenDay, notifiedReleaseDay = :releaseDay WHERE asin = :asin")
     suspend fun updateNotificationFlags(asin: String, sevenDay: Boolean, releaseDay: Boolean)
+
+    @Query("UPDATE releases SET abbAvailable = :available, abbPostUrl = :postUrl, abbMagnetUri = :magnetUri WHERE asin = :asin")
+    suspend fun updateAbbAvailability(asin: String, available: Boolean, postUrl: String, magnetUri: String)
+
+    @Query("UPDATE releases SET notifiedAbbAvailable = :notified WHERE asin = :asin")
+    suspend fun updateAbbNotifiedFlag(asin: String, notified: Boolean)
 }
 
 @Database(
     entities = [TrackedItemEntity::class, DndRuleEntity::class, ReleaseEntity::class],
-    version = 4,
+    version = 6,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -112,6 +134,22 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE releases ADD COLUMN previousReleaseDateIso TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE releases ADD COLUMN narratorJustAnnounced INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE releases ADD COLUMN abbAvailable INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE releases ADD COLUMN abbPostUrl TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE releases ADD COLUMN abbMagnetUri TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE releases ADD COLUMN notifiedAbbAvailable INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun get(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 Room.databaseBuilder(
@@ -119,7 +157,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "plaintext_audible.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     .fallbackToDestructiveMigration()
                     .build()
                     .also { INSTANCE = it }
