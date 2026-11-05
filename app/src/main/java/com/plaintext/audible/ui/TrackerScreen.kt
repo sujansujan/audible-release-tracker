@@ -248,6 +248,7 @@ fun TrackerScreen(
                     .fillMaxSize()
                     .padding(horizontal = 12.dp, vertical = 6.dp)
             ) {
+                // Item #1 & #6: Clean top header with [ TAB ] on left and only [ SYNC ] on right
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -350,6 +351,7 @@ fun TrackerScreen(
                                     }
                                 }
                             },
+<<<<<<< HEAD
                             onQuickTrack = { type, value, thumbUrl, extId ->
                                 handleAddTracked(type, value, 0, thumbUrl, extId)
                             },
@@ -360,6 +362,10 @@ fun TrackerScreen(
                                     repo.syncCatalog(forceRefresh = false)
                                     Toast.makeText(context, "[ Archived Book: ${trackedBook.queryValue} ]", Toast.LENGTH_SHORT).show()
                                 }
+=======
+                            onQuickTrack = { type, value, thumbUrl ->
+                                handleAddTracked(type, value, 0, thumbUrl, null)
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
                             },
                             onMuteBook = { card ->
                                 scope.launch { repo.muteBook(card.entity.asin, card.entity.title) }
@@ -558,11 +564,14 @@ private fun BottomThumbBar(
     }
 }
 
+<<<<<<< HEAD
 private val marketingSubtitleRegex = Regex(
     ":\\s*(?:a\\s+)?(?:litrpg|progression\\s+fantasy|cultivation|isekai|sci-fi|fantasy)\\s+(?:adventure|epic|novel|series|saga|story|tale).*$",
     RegexOption.IGNORE_CASE
 )
 
+=======
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun UpcomingFeedView(
@@ -654,7 +663,10 @@ private fun UpcomingFeedView(
     ) {
         val seriesList = trackedItems.filter { it.type == TrackType.SERIES }
         val authorList = trackedItems.filter { it.type == TrackType.AUTHOR }
+<<<<<<< HEAD
         val bookList = trackedItems.filter { it.type == TrackType.BOOK }
+=======
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
 
         fun toUiModel(rel: ReleaseEntity): ReleaseCardUiModel {
             val parsedDate = runCatching { LocalDate.parse(rel.releaseDateIso) }.getOrNull()
@@ -676,6 +688,7 @@ private fun UpcomingFeedView(
 
             val matchedSeries = if (rel.seriesTitle.isNotBlank()) {
                 seriesList.firstOrNull { s ->
+<<<<<<< HEAD
                     (s.pinnedAsin.isNotBlank() && s.pinnedAsin.equals(rel.seriesAsin, ignoreCase = true)) ||
                         rel.seriesTitle.equals(s.queryValue, ignoreCase = true) ||
                         (s.pinnedAsin.isBlank() && rel.seriesTitle.contains(s.queryValue, ignoreCase = true))
@@ -691,6 +704,18 @@ private fun UpcomingFeedView(
             val primaryAuthor = rel.authors.split(",").firstOrNull()?.trim().orEmpty()
             val isAuthorTracked = primaryAuthor.isNotBlank() && authorList.any { a ->
                 a.queryValue.equals(primaryAuthor, ignoreCase = true)
+=======
+                    rel.seriesTitle.contains(s.queryValue, ignoreCase = true) ||
+                        s.queryValue.contains(rel.seriesTitle, ignoreCase = true)
+                }
+            } else null
+
+            val primaryAuthor = rel.authors.split(",").firstOrNull()?.trim().orEmpty()
+            val isAuthorTracked = primaryAuthor.isNotBlank() && authorList.any { a ->
+                a.queryValue.equals(primaryAuthor, ignoreCase = true) ||
+                    primaryAuthor.contains(a.queryValue, ignoreCase = true) ||
+                    a.queryValue.contains(primaryAuthor, ignoreCase = true)
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
             }
 
             val seq = rel.seriesSequence
@@ -1080,12 +1105,21 @@ private fun ReleaseScorecard(
                 fontSizeSp = 12
             )
 
+<<<<<<< HEAD
             val showMarkRead = card.canMarkCurrentRead && card.matchedSeriesItem != null && rel.seriesSequence != null
             val showArchiveStandaloneBook = card.matchedStandaloneBookItem != null && !card.isFutureOrTba
             val showTrackSeries = rel.seriesTitle.isNotBlank() && !card.isSeriesAlreadyTracked
             val showTrackAuthor = card.primaryAuthor.isNotBlank() && !card.isPrimaryAuthorAlreadyTracked
 
             if (showMarkRead || showArchiveStandaloneBook || showTrackSeries || showTrackAuthor) {
+=======
+            // Item #4: Only show + Track Series / + Track Author if NOT already tracked
+            val showMarkRead = card.canMarkCurrentRead && card.matchedSeriesItem != null && rel.seriesSequence != null
+            val showTrackSeries = rel.seriesTitle.isNotBlank() && !card.isSeriesAlreadyTracked
+            val showTrackAuthor = card.primaryAuthor.isNotBlank() && !card.isPrimaryAuthorAlreadyTracked
+
+            if (showMarkRead || showTrackSeries || showTrackAuthor) {
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
                 Spacer(modifier = Modifier.height(6.dp))
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1097,6 +1131,7 @@ private fun ReleaseScorecard(
                             onClick = { onMarkSeriesSeqRead(card.matchedSeriesItem, rel.seriesSequence) }
                         )
                     }
+<<<<<<< HEAD
                     // Item #3: 1-tap Archive Book button for released standalone BOOK trackers
                     if (showArchiveStandaloneBook && card.matchedStandaloneBookItem != null) {
                         BracketButton(
@@ -1105,21 +1140,31 @@ private fun ReleaseScorecard(
                             onClick = { onArchiveTrackedBook(card.matchedStandaloneBookItem) }
                         )
                     }
+=======
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
                     if (showTrackSeries) {
                         BracketButton(
                             label = "+ Track Series",
                             color = palette.purple,
+<<<<<<< HEAD
                             onClick = {
                                 val ext = "${rel.seriesAsin}|${card.primaryAuthor}"
                                 onQuickTrack(TrackType.SERIES, rel.seriesTitle, rel.coverUrl, ext)
                             }
+=======
+                            onClick = { onQuickTrack(TrackType.SERIES, rel.seriesTitle, rel.coverUrl) }
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
                         )
                     }
                     if (showTrackAuthor) {
                         BracketButton(
                             label = "+ Track Author",
                             color = palette.yellow,
+<<<<<<< HEAD
                             onClick = { onQuickTrack(TrackType.AUTHOR, card.primaryAuthor, rel.coverUrl, null) }
+=======
+                            onClick = { onQuickTrack(TrackType.AUTHOR, card.primaryAuthor, rel.coverUrl) }
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
                         )
                     }
                 }
@@ -1300,6 +1345,11 @@ private fun TrackedEntitiesView(
             }
         }
 
+<<<<<<< HEAD
+=======
+        // Item #2 & #5: Direct [ LIVE SEARCH ] / [ DIRECT ADD ] switch inside TRACKED search box,
+        // and [ CLEAR ] shown only when catalogResults is non-empty
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
         item(key = "search_box", contentType = "search_box") {
             AsciiBox(
                 headerLabel = if (useDirectMode) "DIRECT MANUAL ADD" else "LIVE CATALOG SEARCH"
@@ -1437,6 +1487,10 @@ private fun TrackedEntitiesView(
                             onClick = { onOpenAbbQuery(searchQuery) }
                         )
                     }
+<<<<<<< HEAD
+=======
+                    // Item #5: Only show [ CLEAR ] when live catalog results are open
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
                     if (catalogResults.isNotEmpty() && !useDirectMode) {
                         BracketButton(
                             label = "CLEAR",
@@ -1517,9 +1571,13 @@ private fun TrackedEntitiesView(
                                 active = seriesTracked,
                                 color = palette.purple,
                                 onClick = {
+<<<<<<< HEAD
                                     // Item #1: Pin both seriesAsin and primary author when following a Series
                                     val pinnedSeriesMeta = "${prod.seriesAsin}|$firstAuthor"
                                     onAddTracked(TrackType.SERIES, prod.seriesTitle, 0, prod.coverUrl, pinnedSeriesMeta)
+=======
+                                    onAddTracked(TrackType.SERIES, prod.seriesTitle, 0, prod.coverUrl, prod.seriesAsin)
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
                                 }
                             )
                         }
@@ -1551,10 +1609,14 @@ private fun TrackedEntitiesView(
                             label = if (bookTracked) "✓ Book" else "+ Book",
                             active = bookTracked,
                             color = palette.green,
+<<<<<<< HEAD
                             onClick = {
                                 val pinnedBookMeta = "${prod.asin}|$firstAuthor"
                                 onAddTracked(TrackType.BOOK, prod.title, 0, prod.coverUrl, pinnedBookMeta)
                             }
+=======
+                            onClick = { onAddTracked(TrackType.BOOK, prod.asin, 0, prod.coverUrl, prod.asin) }
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
                         )
                         BracketButton(
                             label = "ABB",
@@ -1630,7 +1692,11 @@ private fun TrackedEntitiesView(
             } else ""
 
             AsciiBox(
+<<<<<<< HEAD
                 headerLabel = "${item.type.name}$authorTag • [ $upcomingBadgeCount upcoming ]",
+=======
+                headerLabel = "${item.type.name} • [ $upcomingBadgeCount upcoming ]",
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
                 headerColor = typeAccent,
                 onClick = { onSelectSourceForFilter(item) }
             ) {
@@ -1719,6 +1785,15 @@ private fun SettingsAndBackupView(
     ) {
         item(key = "cfg_theme") {
             AsciiBox(headerLabel = "APPEARANCE & SYSTEM THEME") {
+<<<<<<< HEAD
+=======
+                MonoText(
+                    text = "Follow Android system Dark/Light mode automatically or lock to Dracula / Alucard:",
+                    color = palette.comment,
+                    fontSizeSp = 12
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
                 FlowRow(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -1735,6 +1810,10 @@ private fun SettingsAndBackupView(
             }
         }
 
+<<<<<<< HEAD
+=======
+        // Item #2: Removed redundant Direct Manual Add Mode toggle from SETTINGS
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
         item(key = "cfg_options") {
             AsciiBox(headerLabel = "CATALOG & TRACKER OPTIONS") {
                 Row(
@@ -1817,6 +1896,7 @@ private fun SettingsAndBackupView(
             }
         }
 
+        // Item #3: Removed [ Reset 09:00 ] button from NOTIFICATION SCHEDULE
         item(key = "cfg_notif") {
             AsciiBox(headerLabel = "NOTIFICATION SCHEDULE (T-7d, T-0d & ABB)") {
                 MonoText(
@@ -1957,7 +2037,11 @@ private fun AboutPageView(onBack: () -> Unit) {
                     bold = true
                 )
                 MonoText(
+<<<<<<< HEAD
                     text = "Version 2.6.0 • Plain-Text Audiobook Release Tracker",
+=======
+                    text = "Version 2.5.0 • Plain-Text Audiobook Release Tracker",
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
                     color = palette.cyan,
                     fontSizeSp = 12,
                     bold = true
@@ -1996,7 +2080,11 @@ private fun AboutPageView(onBack: () -> Unit) {
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 MonoText(
+<<<<<<< HEAD
                     text = "• Smart Series Pinning & ABB Checker: Locks followed series to their exact author/ASIN, checks AudioBookBay daily with 1.5s throttling, and extracts magnet links automatically.",
+=======
+                    text = "• Smart Deduplication & Reliability: Deep paginated catalog sync, release date shift & narrator announcement detection, automatic 15 MB LRU cache pruning, and T-7d / T-0d notifications.",
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
                     color = palette.foreground,
                     fontSizeSp = 12
                 )

@@ -70,6 +70,7 @@ object AudibleApiClient {
     private const val DISK_CACHE_TTL_MS = 12L * 60L * 60L * 1000L
     private const val PRUNE_MAX_AGE_MS = 30L * 24L * 60L * 60L * 1000L
     private const val PRUNE_MAX_BYTES = 15L * 1024L * 1024L
+<<<<<<< HEAD
     private const val CACHE_DIR_NAME = "audible_catalog_json_v26"
 
     private val ABB_MIRRORS = listOf(
@@ -78,6 +79,10 @@ object AudibleApiClient {
         "https://audiobookbay.fi"
     )
 
+=======
+    private const val CACHE_DIR_NAME = "audible_catalog_json_v24"
+
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
     private val memoryCache = object : LruCache<String, List<CatalogProduct>>(140) {}
     private val personPortraitCache = object : LruCache<String, String>(160) {}
 
@@ -105,13 +110,27 @@ object AudibleApiClient {
     fun initCache(baseCacheDir: File) {
         rootCacheDir = baseCacheDir
         diskCacheDir = File(baseCacheDir, CACHE_DIR_NAME).apply { mkdirs() }
+<<<<<<< HEAD
         runCatching {
             listOf("audible_catalog_json", "audible_catalog_json_v19", "audible_catalog_json_v24").forEach { oldName ->
+=======
+        // Clean up legacy JSON cache folders if present
+        runCatching {
+            listOf("audible_catalog_json", "audible_catalog_json_v19").forEach { oldName ->
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
                 File(baseCacheDir, oldName).listFiles()?.forEach { it.delete() }
             }
         }
     }
 
+<<<<<<< HEAD
+=======
+    /**
+     * Automatic 30-day & 15 MB LRU Disk Cache Pruner.
+     * Evicts any cached JSON or cover file older than 30 days, and if total cache size still
+     * exceeds 15 MB, deletes the oldest files first until under the cap.
+     */
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
     suspend fun pruneStaleDiskCache() = withContext(Dispatchers.IO) {
         val base = rootCacheDir ?: return@withContext
         val now = System.currentTimeMillis()
@@ -163,6 +182,7 @@ object AudibleApiClient {
             else if (word.length <= 3 && word.all { it.isUpperCase() || it == '.' }) word
             else word.lowercase(Locale.US).replaceFirstChar { ch -> ch.titlecase(Locale.US) }
         }
+<<<<<<< HEAD
     }
 
     /**
@@ -245,6 +265,8 @@ object AudibleApiClient {
         }
 
         AbbMatchResult(false)
+=======
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
     }
 
     suspend fun getCacheStats(): CacheStats = withContext(Dispatchers.IO) {
@@ -272,7 +294,10 @@ object AudibleApiClient {
                 File(base, CACHE_DIR_NAME),
                 File(base, "audible_catalog_json"),
                 File(base, "audible_catalog_json_v19"),
+<<<<<<< HEAD
                 File(base, "audible_catalog_json_v24"),
+=======
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
                 File(base, "covers")
             ).forEach { folder ->
                 folder.listFiles()?.forEach { f -> runCatching { f.delete() } }
@@ -281,6 +306,13 @@ object AudibleApiClient {
         CacheStats(0, 0L)
     }
 
+<<<<<<< HEAD
+=======
+    /**
+     * Resolves the exact author thumbnail from their official Audible author page
+     * (https://www.audible.com/author/{authorAsin}) via Audnexus and direct Audible author page scraping.
+     */
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
     suspend fun fetchAudibleAuthorImageUrl(
         authorName: String,
         knownAuthorAsin: String? = null
@@ -444,6 +476,11 @@ object AudibleApiClient {
         thumbUrl.ifBlank { null }
     }
 
+    /**
+     * Deep Paginated Catalog Search (up to 3 pages / 150 items when prolific sources have >= 40 results).
+     * Automatically stops paging as soon as the oldest item on the current page is older than the 30-day
+     * recent cutoff, so normal authors still only take 1 request while prolific authors never miss a book.
+     */
     suspend fun searchCatalog(
         author: String? = null,
         narrator: String? = null,
@@ -493,6 +530,10 @@ object AudibleApiClient {
                 accumulated.putIfAbsent(prod.asin, prod)
             }
 
+<<<<<<< HEAD
+=======
+            // Stop paging if Audible returned fewer than requested items, or if we've already paged past the 30-day cutoff
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
             val reachedPastCutoff = parsedPage.any { it.releaseDateIso != "TBA" && it.releaseDateIso < cutoffIso }
             if (rawCount < numResults.coerceAtMost(50) || reachedPastCutoff) {
                 break
@@ -561,7 +602,11 @@ object AudibleApiClient {
                     if (acceptHtml) {
                         "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
                     } else {
+<<<<<<< HEAD
                         "NocturneTXT/2.6 (Android)"
+=======
+                        "NocturneTXT/2.4 (Android)"
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
                     }
                 )
             }

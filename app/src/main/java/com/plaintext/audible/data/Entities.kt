@@ -71,9 +71,13 @@ data class ReleaseEntity(
     val publisher: String = "",
     val altAsins: String = "",
     val previousReleaseDateIso: String = "",
+<<<<<<< HEAD
     val narratorJustAnnounced: Boolean = false,
     val abbAvailable: Boolean = false,
     val abbPostUrl: String = "",
     val abbMagnetUri: String = "",
     val notifiedAbbAvailable: Boolean = false
+=======
+    val narratorJustAnnounced: Boolean = false
+>>>>>>> 0c80a6bd6412354f728b081bee4dfc17c0cfbe16
 )
