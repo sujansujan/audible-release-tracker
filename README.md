@@ -1,15 +1,9 @@
-# NocturneTXT — Plain-Text Audiobook Release Tracker (v2.8)
+# NocturneTXT — Plain-Text Audiobook Release Tracker (v2.9)
 
 A lean, native Android app inspired by [Plain Text Sports](https://plaintextsports.com/) with official [Dracula and Alucard](https://draculatheme.com/spec) themes for tracking upcoming Audible releases (`api.audible.com/1.0/catalog/products`).
 
-## Key Highlights in v2.8 (Unified Design Language & De-Clutter Suite)
-1. **Standardized `56dp` Thumbnails & Semantic Borders Everywhere**: Every card across `UPCOMING`, `TRACKED` live search results, and `TRACKED` followed sources uses the exact same `56dp` thumbnail with its semantic accent border.
-2. **Unified `14sp` Bold Uppercase Card Titles & `12sp` Metadata Grid**: All primary card titles across `UPCOMING` and `TRACKED` share the same `14sp` bold uppercase typography and `12sp` metadata lines.
-3. **Standardized `+=== SECTION ===+` ASCII Dividers**: `UPCOMING` month headers, `DND` headers, `LIVE CATALOG RESULTS`, and `FOLLOWED SOURCES` all use the same `AsciiSectionHeader` (`+=== ... ===+`).
-4. **Framed `1dp` Terminal Input Fields (`AsciiTextField`)**: Text inputs in `TRACKED` now feature a crisp `1dp` border (highlighting in `cyan` on focus) and a `>` terminal prompt prefix.
-5. **Docked Bottom Filter & Sort Strip on Both `UPCOMING` & `TRACKED`**: `BottomThumbBar` now docks the `FLT:` and `SRT:` horizontal filter/sort strip on `TRACKED` just like `UPCOMING`.
-6. **Consolidated Single-Location Status Badges**: Status tags (`[ NEW ]`, `[ ABB ]`) appear once in the card's top `+---[ ... ]---+` frame header with no duplicate badge line inside the card body.
-7. **Clean `TRACKED` Card Headers & Body Author Line**: Followed `SERIES` and `BOOK` cards display `+---[ SERIES • 1 UPCOMING ]---+` in the header and `Author: <Name>` cleanly inside the card body.
-8. **`Match: [...]` Moved to Expanded View**: Collapsed cards in `UPCOMING` now show a tight 3-line block (`Title`, `Series`, `Author/Narrator`) matching the `56dp` thumbnail height, with `Match: [...]` displayed alongside `Runtime` and `Publisher` when expanded.
-9. **De-Cluttered `TRACKED` Followed Rows**: Removed the duplicate `[ ABB ]` button from compact followed rows so long author/series names and `-1` / `+1` sequence buttons never wrap.
-10. **Context-Aware Top Bar (`[ SYNC ]` Hidden on `SETTINGS` / `ABOUT`)**: Hides `[ SYNC ]` when viewing `SETTINGS` or `ABOUT`.
+## Key Highlights in v2.9 (Precision AudioBookBay Verification)
+1. **Strict Author-Only Word-Boundary Verification**: Never uses narrator or full-cast tokens (`Ray Porter`, `John`, `Full cast`) when verifying an ABB post—requires the actual **Author's surname or pen-name** (`\bpercy\b` or `\bweir\b` for *Exoplanet*; `\bbaldree\b` for *Tales from the Territory*; `\bshirtaloon\b` or `\bdeverell\b` for *He Who Fights with Monsters 13*) to appear as a whole word.
+2. **ABB `Posted:` Date Cutoff Guard**: Parses `Posted: DD Mmm YYYY` from the AudioBookBay search/post page and rejects any upload posted more than 10 days before the book's Audible `releaseDateIso`, making it impossible for an older book with the same title (like Craig Robertson's 2019 *Exoplanet*) to false-match a new release.
+3. **Unnumbered Standalone Series Titles Fix (*Tales from the Territory*)**: Only requires a sequence number in the ABB post title if that number actually appears in `bookTitle` (like `13` in *He Who Fights with Monsters 13*), so standalone-titled series entries like *Tales from the Territory* (`Legends & Lattes #5`) match `Tales from the Territory - Travis Baldree` cleanly.
+4. **Automatic DB Reset of False-Positive ABB Flags (`MIGRATION_6_7`) + On-Expand Check**: Resets any stale `v2.7`/`v2.8` ABB flags on upgrade and automatically triggers a single-book ABB verification whenever you tap to expand an already-released card (`releaseDateIso <= today`).

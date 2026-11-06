@@ -378,6 +378,11 @@ fun TrackerScreen(
                                     repo.dao.updateSeriesReadSequence(trackedSeries.id, seq)
                                     Toast.makeText(context, "[ Marked #${seq} Read ]", Toast.LENGTH_SHORT).show()
                                 }
+                            },
+                            onAutoCheckAbb = { cardItem ->
+                                scope.launch {
+                                    repo.checkSingleReleaseOnAbb(cardItem.entity)
+                                }
                             }
                         )
 
@@ -625,7 +630,8 @@ private fun UpcomingFeedView(
     onMuteBook: (ReleaseCardUiModel) -> Unit,
     onMuteSeries: (ReleaseCardUiModel) -> Unit,
     onUnmuteRule: (DndRuleEntity) -> Unit,
-    onMarkSeriesSeqRead: (TrackedItemEntity, Int) -> Unit
+    onMarkSeriesSeqRead: (TrackedItemEntity, Int) -> Unit,
+    onAutoCheckAbb: (ReleaseCardUiModel) -> Unit = {}
 ) {
     val palette = LocalPtsPalette.current
     val today = remember { LocalDate.now() }
@@ -936,7 +942,12 @@ private fun UpcomingFeedView(
                     onArchiveTrackedBook = onArchiveTrackedBook,
                     onMuteBook = { onMuteBook(card) },
                     onMuteSeries = { onMuteSeries(card) },
-                    onMarkSeriesSeqRead = onMarkSeriesSeqRead
+                    onMarkSeriesSeqRead = onMarkSeriesSeqRead,
+                    onAutoCheckAbb = { cardItem ->
+                        if (!cardItem.entity.abbAvailable && !cardItem.isFutureOrTba) {
+                            onAutoCheckAbb(cardItem)
+                        }
+                    }
                 )
             }
         }
@@ -968,7 +979,12 @@ private fun UpcomingFeedView(
                         onArchiveTrackedBook = onArchiveTrackedBook,
                         onMuteBook = { onMuteBook(card) },
                         onMuteSeries = { onMuteSeries(card) },
-                        onMarkSeriesSeqRead = onMarkSeriesSeqRead
+                        onMarkSeriesSeqRead = onMarkSeriesSeqRead,
+                    onAutoCheckAbb = { cardItem ->
+                        if (!cardItem.entity.abbAvailable && !cardItem.isFutureOrTba) {
+                            onAutoCheckAbb(cardItem)
+                        }
+                    }
                     )
                 }
             }
@@ -990,7 +1006,8 @@ private fun ReleaseScorecard(
     onArchiveTrackedBook: (TrackedItemEntity) -> Unit,
     onMuteBook: () -> Unit,
     onMuteSeries: () -> Unit,
-    onMarkSeriesSeqRead: (TrackedItemEntity, Int) -> Unit
+    onMarkSeriesSeqRead: (TrackedItemEntity, Int) -> Unit,
+    onAutoCheckAbb: (ReleaseCardUiModel) -> Unit = {}
 ) {
     val palette = LocalPtsPalette.current
     val rel = card.entity
@@ -1012,7 +1029,13 @@ private fun ReleaseScorecard(
             else -> palette.surfaceLine
         },
         headerColor = badgeColor,
-        onClick = { isExpanded = !isExpanded }
+        onClick = {
+            val nextExpanded = !isExpanded
+            isExpanded = nextExpanded
+            if (nextExpanded && !rel.abbAvailable && !card.isFutureOrTba) {
+                onAutoCheckAbb(card)
+            }
+        }
     ) {
         // Item #1, #2, #6, #8: Standardized 56dp thumbnail with semantic border,
         // 14sp bold uppercase title, 12sp metadata, no duplicate inner badge or Match: line
@@ -1954,7 +1977,7 @@ private fun AboutPageView(onBack: () -> Unit) {
                     bold = true
                 )
                 MonoText(
-                    text = "Version 2.8.0 • Plain-Text Audiobook Release Tracker",
+                    text = "Version 2.9.0 • Plain-Text Audiobook Release Tracker",
                     color = palette.cyan,
                     fontSizeSp = 12,
                     bold = true

@@ -276,7 +276,7 @@ class ReleaseRepository(context: Context) {
             val match = AudibleApiClient.checkAudioBookBayAvailability(
                 bookTitle = rel.title,
                 allAuthors = rel.authors,
-                allNarrators = rel.narrators,
+                releaseDateIso = rel.releaseDateIso,
                 seriesTitle = rel.seriesTitle,
                 seriesSequence = rel.seriesSequence
             )
@@ -327,7 +327,7 @@ class ReleaseRepository(context: Context) {
                 val match = AudibleApiClient.checkAudioBookBayAvailability(
                     bookTitle = rel.title,
                     allAuthors = rel.authors,
-                    allNarrators = rel.narrators,
+                    releaseDateIso = rel.releaseDateIso,
                     seriesTitle = rel.seriesTitle,
                     seriesSequence = rel.seriesSequence
                 )
