@@ -81,10 +81,60 @@ object AudibleApiClient {
         "https://theaudiobookbay.se"
     )
 
+    private val DEFAULT_PUBLIC_TRACKERS = listOf(
+        "udp://tracker.opentrackr.org:1337/announce",
+        "udp://open.stealth.si:80/announce",
+        "udp://tracker.torrent.eu.org:451/announce",
+        "udp://exodus.desync.com:6969/announce",
+        "udp://tracker.openbittorrent.com:6969/announce"
+    )
+
+    // Item #7: Sticky fastest working mirror memory
+    @Volatile
+    var preferredAbbMirror: String = ABB_MIRRORS.first()
+        private set
+
+    fun getOrderedAbbMirrors(): List<String> {
+        val pref = preferredAbbMirror
+        return listOf(pref) + ABB_MIRRORS.filter { it != pref }
+    }
+
     private val STOP_WORDS = setOf(
         "the", "and", "with", "for", "from", "into", "that", "this", "who", "what",
         "when", "where", "why", "how", "book", "volume", "vol", "part", "series", "novel", "audiobook"
     )
+
+    // Item #1: Spelled-Out Number & Roman Numeral Equivalence Table (1..20)
+    private val NUMBER_EQUIVALENTS: Map<Int, List<String>> = mapOf(
+        1 to listOf("1", "01", "one", "i"),
+        2 to listOf("2", "02", "two", "ii"),
+        3 to listOf("3", "03", "three", "iii"),
+        4 to listOf("4", "04", "four", "iv"),
+        5 to listOf("5", "05", "five", "v"),
+        6 to listOf("6", "06", "six", "vi"),
+        7 to listOf("7", "07", "seven", "vii"),
+        8 to listOf("8", "08", "eight", "viii"),
+        9 to listOf("9", "09", "nine", "ix"),
+        10 to listOf("10", "ten", "x"),
+        11 to listOf("11", "eleven", "xi"),
+        12 to listOf("12", "twelve", "xii"),
+        13 to listOf("13", "thirteen", "xiii"),
+        14 to listOf("14", "fourteen", "xiv"),
+        15 to listOf("15", "fifteen", "xv"),
+        16 to listOf("16", "sixteen", "xvi"),
+        17 to listOf("17", "seventeen", "xvii"),
+        18 to listOf("18", "eighteen", "xviii"),
+        19 to listOf("19", "nineteen", "xix"),
+        20 to listOf("20", "twenty", "xx")
+    )
+
+    private val WORD_TO_NUMBER: Map<String, Int> = buildMap {
+        for ((num, tokens) in NUMBER_EQUIVALENTS) {
+            for (tok in tokens) {
+                put(tok, num)
+            }
+        }
+    }
 
     private val abbPostedDateFormatter: DateTimeFormatter = DateTimeFormatterBuilder()
         .parseCaseInsensitive()
@@ -179,14 +229,93 @@ object AudibleApiClient {
     }
 
     /**
-     * Extracts required author verification tokens (surnames / pen-names of each listed author,
-     * NEVER narrator names or "Full cast") so common narrator names like "Ray Porter" or "John"
-     * never cause a false positive on 1-word titles like "Exoplanet".
+     * Item #5: Normalizes apostrophes, ampersands, and punctuation so "Legends & Lattes"
+     * and "Legends and Lattes" or "Traveler's" and "Travelers" match identically.
      */
+    internal fun normalizeForAbbComparison(raw: String): String {
+        return raw.lowercase(Locale.US)
+            .replace("’", "")
+            .replace("'", "")
+            .replace("&", " and ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
+    internal fun extractSignificantWords(raw: String): List<String> {
+        val norm = normalizeForAbbComparison(raw)
+        return norm.split(Regex("[^a-z0-9]+"))
+            .filter { w ->
+                w.length >= 3 &&
+                    w !in STOP_WORDS &&
+                    !w.all { ch -> ch.isDigit() } &&
+                    w !in WORD_TO_NUMBER
+            }
+    }
+
+    /**
+     * Item #1: Checks whether `targetNumber` appears in `text` as a digit (`9`, `09`),
+     * spelled-out word (`nine`, `book nine`), or Roman numeral (`book ix`).
+     */
+    internal fun containsEquivalentNumber(text: String, targetNumber: Int): Boolean {
+        val norm = normalizeForAbbComparison(text)
+        val equivalents = NUMBER_EQUIVALENTS[targetNumber] ?: listOf(targetNumber.toString(), targetNumber.toString().padStart(2, '0'))
+        for (tok in equivalents) {
+            // For Roman numerals like "i", "v", "x", require "book/vol/part/#" prefix so random initials don't false-match
+            if (tok in setOf("i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x")) {
+                if (Regex("\\b(?:book|vol|volume|part|#)\\s*$tok\\b").containsMatchIn(norm)) {
+                    return true
+                }
+            } else {
+                if (Regex("\\b$tok\\b").containsMatchIn(norm)) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    /**
+     * Item #4: Detects if an ABB post title explicitly names a DIFFERENT installment number
+     * (e.g., `Book 1`, `Vol 2`, `#3`, or `Book One`) than the expected `expectedSequence`,
+     * preventing older books in the same series from matching a new sequel.
+     */
+    internal fun hasConflictingInstallmentNumber(linkTitle: String, expectedSequence: Int?): Boolean {
+        if (expectedSequence == null || expectedSequence <= 0) return false
+        val norm = normalizeForAbbComparison(linkTitle)
+
+        // Check explicit "Book/Vol/Part/# <token>" patterns in the ABB title
+        val installmentRegex = Regex("\\b(?:book|vol|volume|part|#)\\s*([0-9]{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|i|ii|iii|iv|v|vi|vii|viii|ix|x)\\b")
+        val foundNumbers = mutableSetOf<Int>()
+        for (m in installmentRegex.findAll(norm)) {
+            val tok = m.groupValues.getOrNull(1).orEmpty()
+            val n = tok.toIntOrNull() ?: WORD_TO_NUMBER[tok]
+            if (n != null) foundNumbers.add(n)
+        }
+
+        // If the ABB post explicitly declares a Book/Vol/# number and NONE of them match expectedSequence, reject it!
+        return foundNumbers.isNotEmpty() && expectedSequence !in foundNumbers
+    }
+
+    /**
+     * Item #3: Checks if an ABB post snippet or detail page is a foreign-language upload
+     * when `englishOnly` is enabled.
+     */
+    internal fun isForeignLanguageAbbPost(postContextPlain: String, linkTitle: String): Boolean {
+        val langMatch = Regex("Language\\s*:\\s*([A-Za-z]+)", RegexOption.IGNORE_CASE).find(postContextPlain)
+        if (langMatch != null) {
+            val lang = langMatch.groupValues.getOrNull(1)?.trim().orEmpty()
+            if (lang.isNotBlank() && !lang.equals("English", ignoreCase = true)) {
+                return true
+            }
+        }
+        val foreignTagRegex = Regex("\\b(german|spanish|español|espanol|french|français|francais|italian|italiano|portuguese|russian|polish|dutch|hörbuch|horbuch)\\b", RegexOption.IGNORE_CASE)
+        return foreignTagRegex.containsMatchIn(linkTitle)
+    }
+
     internal fun extractAuthorVerificationTokens(allAuthors: String): List<String> {
         val tokens = mutableListOf<String>()
         for (authorPart in allAuthors.split(",")) {
-            val cleaned = cleanContributorName(authorPart).lowercase(Locale.US).trim()
+            val cleaned = normalizeForAbbComparison(cleanContributorName(authorPart))
             if (cleaned.isBlank() || cleaned == "unknown author" || cleaned == "full cast") continue
             val words = cleaned.split(Regex("[^a-z0-9]+")).filter { it.length >= 3 }
             val surnameOrPenName = words.lastOrNull() ?: continue
@@ -197,15 +326,10 @@ object AudibleApiClient {
         return tokens
     }
 
-    /**
-     * Parses AudioBookBay's `Posted: DD Mmm YYYY` date (e.g. `Posted: 6 Oct 2026` or `Posted: 12 Mar 2019`)
-     * from a post snippet or details page.
-     */
     internal fun parseAbbPostedDate(text: String): LocalDate? {
         val match = Regex("Posted:\\s*(\\d{1,2}\\s+[A-Za-z]{3,9}\\s+\\d{4})", RegexOption.IGNORE_CASE)
             .find(text) ?: return null
         val rawDate = match.groupValues.getOrNull(1)?.trim()?.replace(Regex("\\s+"), " ") ?: return null
-        // Normalize month token to first 3 letters (e.g. "October" -> "Oct")
         val parts = rawDate.split(" ")
         if (parts.size != 3) return null
         val normalized = "${parts[0]} ${parts[1].take(3)} ${parts[2]}"
@@ -213,22 +337,43 @@ object AudibleApiClient {
     }
 
     /**
-     * Precision AudioBookBay Availability & Magnet Checker:
-     * 1) Only requires a number in the ABB post title if that number is actually part of `coreTitle`
-     *    (fixes *Tales from the Territory*, which is `Legends & Lattes #5` on Audible but has no `5` in its title).
-     * 2) Strictly requires at least one **Author** surname/pen-name (`extractAuthorVerificationTokens(allAuthors)`)
-     *    to match as a whole word (`...`) in the ABB post title or post block—never narrator/cast names.
-     * 3) Verifies the ABB `Posted:` date against `releaseDateIso`: if an ABB upload has a `Posted:` date more than
-     *    10 days *before* the book's Audible release date, it is an older unrelated book (fixes *Exoplanet*).
-     * 4) Only marks a mirror as valid if it returned actual ABB page structure (`postTitle` / `id="content"`),
-     *    falling back across `.lu`, `.is`, `.fi`, and `.se` if Cloudflare challenges the first mirror.
+     * Item #6: Extracts tracker announce URLs (`udp://.../announce` or `http(s)://.../announce`)
+     * from the AudioBookBay post detail HTML and builds a fast-bootstrapping magnet URI.
+     */
+    internal fun buildEnrichedMagnetUri(infoHash: String, displayName: String, postHtml: String): String {
+        val cleanHash = infoHash.trim().lowercase(Locale.US)
+        val dn = URLEncoder.encode(displayName, "UTF-8")
+        val trackerRegex = Regex("((?:udp|https?)://[^\"'\\s<>]+/announce)", RegexOption.IGNORE_CASE)
+        val scrapedTrackers = trackerRegex.findAll(postHtml)
+            .map { it.groupValues[1].trim() }
+            .distinct()
+            .take(8)
+            .toList()
+
+        val trackersToUse = (scrapedTrackers + DEFAULT_PUBLIC_TRACKERS).distinct().take(8)
+        val trParams = trackersToUse.joinToString("") { tr ->
+            "&tr=${URLEncoder.encode(tr, "UTF-8")}"
+        }
+        return "magnet:?xt=urn:btih:$cleanHash&dn=$dn$trParams"
+    }
+
+    /**
+     * 7-Point Precision AudioBookBay Availability & Magnet Checker:
+     * 1) Spelled-Out Number & Roman Numeral Equivalence (`Book 9` <-> `Book Nine` <-> `Book IX`)
+     * 2) Series-First Title Fallback (`"Series Name Book #"` or `"Book Title"`)
+     * 3) Foreign-Language Upload Rejector (`Language: English` verification)
+     * 4) Conflicting Series Installment Guard (blocks `Book 1` when checking `Book 2`)
+     * 5) Apostrophe & Ampersand Normalization (`&` <-> `and`, `’` <-> `'`)
+     * 6) Tracker-Enriched Magnet URIs (`&tr=udp://...`)
+     * 7) Sticky Fastest-Mirror Ordering (`getOrderedAbbMirrors()`)
      */
     suspend fun checkAudioBookBayAvailability(
         bookTitle: String,
         allAuthors: String,
         releaseDateIso: String = "",
         seriesTitle: String = "",
-        seriesSequence: Int? = null
+        seriesSequence: Int? = null,
+        englishOnly: Boolean = true
     ): AbbMatchResult = withContext(Dispatchers.IO) {
         val coreTitle = bookTitle
             .substringBefore(":")
@@ -241,31 +386,44 @@ object AudibleApiClient {
         val releaseDate = runCatching { LocalDate.parse(releaseDateIso) }.getOrNull()
         val earliestAllowedPostDate = releaseDate?.minusDays(10)
 
-        // Only require numbers that actually appear in the book's coreTitle!
-        val explicitTitleNumbers = Regex("\\b(\\d+)\\b").findAll(coreTitle)
-            .map { it.groupValues[1] }
-            .toSet()
+        // Numbers explicitly written in coreTitle (e.g. 13 in "He Who Fights with Monsters 13", or "Nine" in "Book Nine")
+        val explicitTitleNumbers = mutableSetOf<Int>()
+        for (m in Regex("\\b(\\d{1,2})\\b").findAll(coreTitle)) {
+            m.groupValues[1].toIntOrNull()?.let { explicitTitleNumbers.add(it) }
+        }
+        for (m in Regex("\\b(?:book|vol|volume|part)\\s+(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|i|ii|iii|iv|v|vi|vii|viii|ix|x)\\b", RegexOption.IGNORE_CASE).findAll(coreTitle)) {
+            WORD_TO_NUMBER[m.groupValues[1].lowercase(Locale.US)]?.let { explicitTitleNumbers.add(it) }
+        }
 
-        val significantTitleWords = coreTitle.lowercase(Locale.US)
-            .split(Regex("[^a-z0-9]+"))
-            .filter { it.length >= 3 && it !in STOP_WORDS && !it.all { ch -> ch.isDigit() } }
+        val significantTitleWords = extractSignificantWords(coreTitle)
+        val significantSeriesWords = extractSignificantWords(seriesTitle)
 
         val authorTokens = extractAuthorVerificationTokens(allAuthors)
         val primaryAuthorFirst = allAuthors.split(",").firstOrNull()?.trim().orEmpty()
         val primaryAuthorSurname = authorTokens.firstOrNull().orEmpty()
 
-        // Build search queries:
-        // For 1-word titles (like "Exoplanet" or "Overworld"), query "Title AuthorSurname" first so ABB doesn't return 20 unrelated sci-fi books!
-        // For multi-word titles (like "Tales from the Territory" or "He Who Fights with Monsters 13"), query coreTitle + authorSurname and coreTitle.
+        val cleanQueryTitle = normalizeForAbbComparison(coreTitle)
+        val cleanQuerySeries = normalizeForAbbComparison(seriesTitle)
+
+        // Build ordered search queries
         val candidateQueries = linkedSetOf<String>()
         if (significantTitleWords.size <= 1 && primaryAuthorSurname.isNotBlank()) {
-            candidateQueries.add("${coreTitle.lowercase(Locale.US)} $primaryAuthorSurname")
-            candidateQueries.add(coreTitle.lowercase(Locale.US))
+            candidateQueries.add("$cleanQueryTitle $primaryAuthorSurname")
+            candidateQueries.add(cleanQueryTitle)
         } else {
             if (primaryAuthorSurname.isNotBlank()) {
-                candidateQueries.add("${coreTitle.lowercase(Locale.US)} $primaryAuthorSurname")
+                candidateQueries.add("$cleanQueryTitle $primaryAuthorSurname")
             }
-            candidateQueries.add(coreTitle.lowercase(Locale.US))
+            candidateQueries.add(cleanQueryTitle)
+        }
+        // Item #2: Series-first fallback query when seriesTitle + seriesSequence are known
+        if (cleanQuerySeries.isNotBlank() && seriesSequence != null && seriesSequence > 0) {
+            val seriesFallbackQuery = if (primaryAuthorSurname.isNotBlank()) {
+                "$cleanQuerySeries $seriesSequence $primaryAuthorSurname"
+            } else {
+                "$cleanQuerySeries $seriesSequence"
+            }
+            candidateQueries.add(seriesFallbackQuery)
         }
 
         val h2LinkRegex = Regex(
@@ -282,7 +440,7 @@ object AudibleApiClient {
         )
         val fallbackHashRegex = Regex("\\b([a-fA-F0-9]{40})\\b")
 
-        for (mirror in ABB_MIRRORS) {
+        for (mirror in getOrderedAbbMirrors()) {
             var mirrorServedValidAbbPage = false
             for (qRaw in candidateQueries) {
                 val encodedQ = URLEncoder.encode(qRaw, "UTF-8")
@@ -293,11 +451,11 @@ object AudibleApiClient {
                     originUrl = mirror
                 ) ?: continue
 
-                // Only count as a real ABB page (not a Cloudflare challenge) if it contains ABB's layout markers
                 if (searchHtml.contains("postTitle", ignoreCase = true) ||
-                    searchHtml.contains("audiobookbay", ignoreCase = true) && searchHtml.contains("id=\"content\"", ignoreCase = true)
+                    (searchHtml.contains("audiobookbay", ignoreCase = true) && searchHtml.contains("id=\"content\"", ignoreCase = true))
                 ) {
                     mirrorServedValidAbbPage = true
+                    preferredAbbMirror = mirror
                 }
 
                 val linkMatches = h2LinkRegex.findAll(searchHtml).toList().ifEmpty {
@@ -311,9 +469,8 @@ object AudibleApiClient {
                     }
 
                     val rawAnchorHtml = match.groupValues.getOrNull(2).orEmpty()
-                    val linkTitle = HtmlCompat.fromHtml(rawAnchorHtml, HtmlCompat.FROM_HTML_MODE_COMPACT)
-                        .toString()
-                        .lowercase(Locale.US)
+                    val linkTitleRaw = HtmlCompat.fromHtml(rawAnchorHtml, HtmlCompat.FROM_HTML_MODE_COMPACT).toString()
+                    val linkTitleNorm = normalizeForAbbComparison(linkTitleRaw)
 
                     val windowStart = match.range.first.coerceAtLeast(0)
                     val windowEnd = (match.range.last + 1400).coerceAtMost(searchHtml.length)
@@ -321,32 +478,52 @@ object AudibleApiClient {
                         searchHtml.substring(windowStart, windowEnd),
                         HtmlCompat.FROM_HTML_MODE_COMPACT
                     ).toString()
-                    val postContextLower = postContextPlain.lowercase(Locale.US)
+                    val postContextNorm = normalizeForAbbComparison(postContextPlain)
 
-                    // 1. Check that all significant title words appear as whole words in the ABB post title
-                    val wordsMatch = significantTitleWords.isNotEmpty() && significantTitleWords.all { w ->
-                        Regex("\\b${Regex.escape(w)}\\b").containsMatchIn(linkTitle)
+                    // Item #3: Reject foreign-language uploads when englishOnly is enabled
+                    if (englishOnly && isForeignLanguageAbbPost(postContextPlain, linkTitleRaw)) {
+                        continue
                     }
 
-                    // 2. If the book's own title contains a number (e.g., "13"), require that exact number in linkTitle
-                    val numbersMatch = explicitTitleNumbers.all { num ->
-                        val padded = num.padStart(2, '0')
-                        Regex("\\b(?:$num|$padded)\\b").containsMatchIn(linkTitle)
+                    // Item #4: Reject conflicting series installment numbers (e.g. "Book 1" when checking Book 2)
+                    val expectedSeq = seriesSequence ?: explicitTitleNumbers.firstOrNull()
+                    if (hasConflictingInstallmentNumber(linkTitleRaw, expectedSeq)) {
+                        continue
                     }
 
-                    // 3. Strict Author-Only Word-Boundary Check (never narrator or cast names!)
+                    // Item #1 & #2: Title match (either core book title words + explicit numbers match,
+                    // OR series title words + seriesSequence match when uploader titled by series)
+                    val bookWordsMatch = significantTitleWords.isNotEmpty() && significantTitleWords.all { w ->
+                        Regex("\\b${Regex.escape(w)}\\b").containsMatchIn(linkTitleNorm)
+                    }
+                    val explicitNumbersMatch = explicitTitleNumbers.all { num ->
+                        containsEquivalentNumber(linkTitleNorm, num)
+                    }
+                    val primaryTitleMatch = bookWordsMatch && explicitNumbersMatch
+
+                    val seriesFallbackMatch = significantSeriesWords.isNotEmpty() &&
+                        seriesSequence != null &&
+                        seriesSequence > 0 &&
+                        significantSeriesWords.all { w -> Regex("\\b${Regex.escape(w)}\\b").containsMatchIn(linkTitleNorm) } &&
+                        containsEquivalentNumber(linkTitleNorm, seriesSequence) &&
+                        (significantTitleWords.isEmpty() || significantTitleWords.any { w ->
+                            Regex("\\b${Regex.escape(w)}\\b").containsMatchIn(linkTitleNorm) ||
+                                Regex("\\b${Regex.escape(w)}\\b").containsMatchIn(postContextNorm)
+                        })
+
+                    // Strict Author-Only Word-Boundary Check
                     val authorMatches = authorTokens.isNotEmpty() && authorTokens.any { authTok ->
                         val boundary = Regex("\\b${Regex.escape(authTok)}\\b")
-                        boundary.containsMatchIn(linkTitle) || boundary.containsMatchIn(postContextLower)
+                        boundary.containsMatchIn(linkTitleNorm) || boundary.containsMatchIn(postContextNorm)
                     }
 
-                    // 4. ABB Posted Date Check on search snippet (if present): reject uploads posted >10 days before Audible releaseDateIso
+                    // Posted Date Check on search snippet
                     val snippetPostedDate = parseAbbPostedDate(postContextPlain)
                     if (earliestAllowedPostDate != null && snippetPostedDate != null && snippetPostedDate.isBefore(earliestAllowedPostDate)) {
                         continue
                     }
 
-                    if (wordsMatch && numbersMatch && authorMatches) {
+                    if ((primaryTitleMatch || seriesFallbackMatch) && authorMatches) {
                         val fullPostUrl = when {
                             rawHref.startsWith("http") -> rawHref
                             rawHref.startsWith("/") -> "$mirror$rawHref"
@@ -361,9 +538,11 @@ object AudibleApiClient {
                         )
                         if (postHtml != null) {
                             val postPlain = HtmlCompat.fromHtml(postHtml, HtmlCompat.FROM_HTML_MODE_COMPACT).toString()
+                            if (englishOnly && isForeignLanguageAbbPost(postPlain, linkTitleRaw)) {
+                                continue
+                            }
                             val detailPostedDate = parseAbbPostedDate(postPlain)
                             if (earliestAllowedPostDate != null && detailPostedDate != null && detailPostedDate.isBefore(earliestAllowedPostDate)) {
-                                // False positive from an older book with the same title! Skip it.
                                 continue
                             }
 
@@ -371,8 +550,12 @@ object AudibleApiClient {
                                 ?: fallbackHashRegex.find(postHtml)?.groupValues?.getOrNull(1)
                                 ?: ""
                             if (hash.length == 40) {
-                                val dn = URLEncoder.encode("$coreTitle - $primaryAuthorFirst", "UTF-8")
-                                magnetUri = "magnet:?xt=urn:btih:${hash.lowercase(Locale.US)}&dn=$dn"
+                                // Item #6: Build tracker-enriched magnet URI
+                                magnetUri = buildEnrichedMagnetUri(
+                                    infoHash = hash,
+                                    displayName = "$coreTitle - $primaryAuthorFirst",
+                                    postHtml = postHtml
+                                )
                             }
                         }
 
@@ -721,7 +904,7 @@ object AudibleApiClient {
                     if (acceptHtml) {
                         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
                     } else {
-                        "NocturneTXT/2.9 (Android)"
+                        "NocturneTXT/3.0 (Android)"
                     }
                 )
             }

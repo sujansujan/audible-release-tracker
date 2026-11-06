@@ -302,7 +302,7 @@ fun TrackerScreen(
                                     directUrl
                                 } else {
                                     val q = URLEncoder.encode("${card.entity.title} ${card.primaryAuthor}".trim().lowercase(), "UTF-8")
-                                    "https://audiobookbay.lu/?s=$q&cat=undefined%2Cundefined"
+                                    "${AudibleApiClient.preferredAbbMirror}/?s=$q"
                                 }
                                 context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(abbUrl)))
                             },
@@ -420,7 +420,7 @@ fun TrackerScreen(
                             },
                             onOpenAbbQuery = { rawQuery ->
                                 val q = URLEncoder.encode(rawQuery.trim().lowercase(), "UTF-8")
-                                val abbUrl = "https://audiobookbay.lu/?s=$q&cat=undefined%2Cundefined"
+                                val abbUrl = "${AudibleApiClient.preferredAbbMirror}/?s=$q"
                                 context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(abbUrl)))
                             }
                         )
@@ -1977,7 +1977,7 @@ private fun AboutPageView(onBack: () -> Unit) {
                     bold = true
                 )
                 MonoText(
-                    text = "Version 2.9.0 • Plain-Text Audiobook Release Tracker",
+                    text = "Version 3.0.0 • Plain-Text Audiobook Release Tracker",
                     color = palette.cyan,
                     fontSizeSp = 12,
                     bold = true

@@ -278,7 +278,8 @@ class ReleaseRepository(context: Context) {
                 allAuthors = rel.authors,
                 releaseDateIso = rel.releaseDateIso,
                 seriesTitle = rel.seriesTitle,
-                seriesSequence = rel.seriesSequence
+                seriesSequence = rel.seriesSequence,
+                englishOnly = getPrefs().englishOnly
             )
             if (match.available) {
                 dao.updateAbbAvailability(
@@ -329,7 +330,8 @@ class ReleaseRepository(context: Context) {
                     allAuthors = rel.authors,
                     releaseDateIso = rel.releaseDateIso,
                     seriesTitle = rel.seriesTitle,
-                    seriesSequence = rel.seriesSequence
+                    seriesSequence = rel.seriesSequence,
+                    englishOnly = filterPrefs.englishOnly
                 )
                 if (match.available) {
                     dao.updateAbbAvailability(
