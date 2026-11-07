@@ -485,21 +485,25 @@ class ReleaseRepository(context: Context) {
 
             effectiveExternalIds[item.id] = updatedExtId
 
+            val isDuplicateThumb = item.thumbnailUrl.isNotBlank() &&
+                tracked.count { it.thumbnailUrl == item.thumbnailUrl } > 1
+
             val isAuthorShowingBookCover = item.type == TrackType.AUTHOR && (
                 item.thumbnailUrl.isBlank() ||
+                    isDuplicateThumb ||
                     item.thumbnailUrl in bookCoversSet ||
                     (!item.thumbnailUrl.contains("amzn-author-media", ignoreCase = true) &&
-                        !item.thumbnailUrl.contains("ssl-images-amazon", ignoreCase = true))
+                        !item.thumbnailUrl.contains("_RO112", ignoreCase = true))
             )
 
-            var updatedThumb = item.thumbnailUrl
-            if (item.thumbnailUrl.isBlank() || isAuthorShowingBookCover) {
+            var updatedThumb = if (isDuplicateThumb) "" else item.thumbnailUrl
+            if (updatedThumb.isBlank() || isAuthorShowingBookCover) {
                 val portrait = when (item.type) {
                     TrackType.AUTHOR -> AudibleApiClient.fetchAudibleAuthorImageUrl(canonicalName, updatedExtId?.substringBefore("|"))
                     TrackType.NARRATOR -> AudibleApiClient.fetchNarratorPortraitUrl(canonicalName)
                     else -> null
                 }
-                if (!portrait.isNullOrBlank()) {
+                if (!portrait.isNullOrBlank() && portrait !in assignedThumbnails) {
                     updatedThumb = portrait
                 } else if (updatedThumb.isBlank()) {
                     val availableCovers = results.mapNotNull { it.coverUrl.takeIf { u -> u.isNotBlank() } }

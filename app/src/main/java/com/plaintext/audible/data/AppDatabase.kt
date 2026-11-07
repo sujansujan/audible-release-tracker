@@ -95,7 +95,7 @@ interface TrackerDao {
 
 @Database(
     entities = [TrackedItemEntity::class, DndRuleEntity::class, ReleaseEntity::class],
-    version = 7,
+    version = 8,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -152,9 +152,17 @@ abstract class AppDatabase : RoomDatabase() {
 
         private val MIGRATION_6_7 = object : Migration(6, 7) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                // Reset any false-positive ABB matches from v2.7/v2.8 so they are re-verified with strict author + Posted date rules
                 db.execSQL(
                     "UPDATE releases SET abbAvailable = 0, abbPostUrl = '', abbMagnetUri = '', notifiedAbbAvailable = 0"
+                )
+            }
+        }
+
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Clear any _RO112 or shared author thumbnails so each author re-validates its own hero portrait or book cover
+                db.execSQL(
+                    "UPDATE tracked_items SET thumbnailUrl = '' WHERE type = 'AUTHOR' AND (thumbnailUrl LIKE '%_RO112%' OR thumbnailUrl IN (SELECT thumbnailUrl FROM tracked_items WHERE thumbnailUrl != '' GROUP BY thumbnailUrl HAVING COUNT(*) > 1))"
                 )
             }
         }
@@ -172,7 +180,8 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_3_4,
                         MIGRATION_4_5,
                         MIGRATION_5_6,
-                        MIGRATION_6_7
+                        MIGRATION_6_7,
+                        MIGRATION_7_8
                     )
                     .fallbackToDestructiveMigration()
                     .build()

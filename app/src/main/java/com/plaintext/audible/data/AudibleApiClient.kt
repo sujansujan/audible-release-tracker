@@ -631,6 +631,8 @@ object AudibleApiClient {
                 val arr = JSONArray(audnexSearchJson)
                 for (i in 0 until arr.length().coerceAtMost(5)) {
                     val obj = arr.optJSONObject(i) ?: continue
+                    val candName = cleanContributorName(obj.optString("name", ""))
+                    if (!candName.equals(cleaned, ignoreCase = true)) continue
                     val directImg = obj.optString("image", "").trim()
                     if (directImg.startsWith("https://")) {
                         personPortraitCache.put(cacheKey, directImg)
@@ -699,7 +701,7 @@ object AudibleApiClient {
             )
             val html = executeGetWithRetry(authorPageUrl, acceptHtml = true)
             if (html != null) {
-                val extracted = extractAuthorImageFromAudibleHtml(html)
+                val extracted = extractAuthorImageFromAudibleHtml(html, cleaned)
                 if (extracted.startsWith("https://")) {
                     personPortraitCache.put(cacheKey, extracted)
                     return@withContext extracted
@@ -710,24 +712,49 @@ object AudibleApiClient {
         null
     }
 
-    private fun extractAuthorImageFromAudibleHtml(html: String): String {
+    /**
+     * Extracts ONLY the primary author's own profile portrait from the top header section of
+     * `https://www.audible.com/author/{asin}`, strictly slicing the HTML BEFORE "Best Sellers",
+     * "Most popular", and "Listeners also enjoy" so an author without a photo (like C. Mantis)
+     * never grabs a portrait from the "Listeners also enjoy" carousel (like Zogarth).
+     */
+    private fun extractAuthorImageFromAudibleHtml(html: String, authorName: String): String {
+        // Cut off the HTML before the book list and "Listeners also enjoy" similar-authors carousel!
+        val heroHeaderHtml = html
+            .substringBefore("Listeners also enjoy")
+            .substringBefore("listeners-also-enjoy")
+            .substringBefore("similar-authors")
+            .substringBefore("Best Sellers")
+            .substringBefore("Most popular")
+
         val amznAuthorMedia = Regex(
             "https://(?:m\\.media-amazon\\.com|images-na\\.ssl-images-amazon\\.com)/images/S/amzn-author-media[^\"'\\s>]*"
-        ).find(html)?.value.orEmpty()
+        ).find(heroHeaderHtml)?.value.orEmpty()
         if (amznAuthorMedia.startsWith("https://")) return amznAuthorMedia
 
         val ogRegex = Regex("<meta\\s+[^>]*property=[\"']og:image[\"'][^>]*content=[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
         val ogReverseRegex = Regex("<meta\\s+[^>]*content=[\"']([^\"']+)[\"'][^>]*property=[\"']og:image[\"']", RegexOption.IGNORE_CASE)
-        val ogUrl = ogRegex.find(html)?.groupValues?.getOrNull(1)
-            ?: ogReverseRegex.find(html)?.groupValues?.getOrNull(1)
+        val ogUrl = ogRegex.find(heroHeaderHtml)?.groupValues?.getOrNull(1)
+            ?: ogReverseRegex.find(heroHeaderHtml)?.groupValues?.getOrNull(1)
             ?: ""
         if (isValidAudibleAuthorPortraitUrl(ogUrl)) return ogUrl
 
-        val imgRegex = Regex("https://(?:m\\.media-amazon\\.com|images-na\\.ssl-images-amazon\\.com)/images/I/[^\"'\\s>]*_RO\\d+[^\"'\\s>]*\\.(?:jpg|jpeg|png)")
-        for (match in imgRegex.findAll(html)) {
-            val candidate = match.value
-            if (isValidAudibleAuthorPortraitUrl(candidate)) {
-                return candidate
+        // Check circular _RO112 author image inside the top hero header section only
+        val imgTagRegex = Regex(
+            "<img\\s+[^>]*src=[\"'](https://(?:m\\.media-amazon\\.com|images-na\\.ssl-images-amazon\\.com)/images/I/[^\"'\\s>]*_RO\\d+[^\"'\\s>]*\\.(?:jpg|jpeg|png))[\"'][^>]*>",
+            RegexOption.IGNORE_CASE
+        )
+        val authorSurname = authorName.trim().split(" ").lastOrNull()?.lowercase(Locale.US).orEmpty()
+        for (match in imgTagRegex.findAll(heroHeaderHtml)) {
+            val fullImgTag = match.value.lowercase(Locale.US)
+            val candidateUrl = match.groupValues.getOrNull(1).orEmpty()
+            // If the <img> tag has an alt attribute, verify it doesn't belong to a different author
+            val altMatch = Regex("alt=[\"']([^\"']+)[\"']").find(fullImgTag)?.groupValues?.getOrNull(1).orEmpty()
+            if (altMatch.isNotBlank() && authorSurname.length >= 3 && !altMatch.contains(authorSurname)) {
+                continue
+            }
+            if (isValidAudibleAuthorPortraitUrl(candidateUrl)) {
+                return candidateUrl
             }
         }
         return ""
@@ -904,7 +931,7 @@ object AudibleApiClient {
                     if (acceptHtml) {
                         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
                     } else {
-                        "NocturneTXT/3.0 (Android)"
+                        "NocturneTXT/3.1 (Android)"
                     }
                 )
             }
