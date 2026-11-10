@@ -381,7 +381,10 @@ fun TrackerScreen(
                             },
                             onAutoCheckAbb = { cardItem ->
                                 scope.launch {
-                                    repo.checkSingleReleaseOnAbb(cardItem.entity)
+                                    Toast.makeText(context, "[ Checking ABB: ${cardItem.entity.title}... ]", Toast.LENGTH_SHORT).show()
+                                    val found = repo.checkSingleReleaseOnAbb(cardItem.entity)
+                                    val msg = if (found) "[ Found on ABB! Magnet ready ]" else "[ Not found on ABB yet ]"
+                                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                                 }
                             }
                         )
@@ -1193,6 +1196,13 @@ private fun ReleaseScorecard(
                     color = if (rel.abbAvailable) palette.green else palette.orange,
                     onClick = onOpenAudioBookBay
                 )
+                if (!rel.abbAvailable && !card.isFutureOrTba) {
+                    BracketButton(
+                        label = "Check ABB",
+                        color = palette.cyan,
+                        onClick = { onAutoCheckAbb(card) }
+                    )
+                }
                 if (rel.abbMagnetUri.startsWith("magnet:")) {
                     BracketButton(
                         label = "Magnet",
@@ -1977,7 +1987,7 @@ private fun AboutPageView(onBack: () -> Unit) {
                     bold = true
                 )
                 MonoText(
-                    text = "Version 3.1.0 • Plain-Text Audiobook Release Tracker",
+                    text = "Version 3.2.0 • Plain-Text Audiobook Release Tracker",
                     color = palette.cyan,
                     fontSizeSp = 12,
                     bold = true

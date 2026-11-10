@@ -136,6 +136,46 @@ class ReleaseCheckWorker(
         private const val CHANNEL_ID = "pts_audible_releases"
         private const val WORK_NAME = "pts_audible_daily_check"
 
+        fun notifyAbbAvailableNow(context: Context, rel: ReleaseEntity, domain: String) {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Release & ABB Alerts (T-7d, T-0d, ABB)",
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "Notifications 1 week before, on release day, and when found on AudioBookBay"
+            }
+            nm.createNotificationChannel(channel)
+
+            val tag = "[ON ABB]"
+            val notifId = (rel.asin + tag).hashCode()
+            val title = "$tag ${rel.title}"
+            val seriesPart = if (rel.seriesTitle.isNotBlank()) " (${rel.seriesTitle})" else ""
+            val body = "Available on AudioBookBay • By ${rel.authors}$seriesPart"
+
+            val url = rel.abbPostUrl.takeIf { it.startsWith("https://") } ?: run {
+                val query = URLEncoder.encode("${rel.title} ${rel.authors.split(",").firstOrNull().orEmpty()}", "UTF-8")
+                "https://audiobookbay.lu/?s=$query"
+            }
+            val viewIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            val contentPending = PendingIntent.getActivity(
+                context,
+                notifId,
+                viewIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val builder = NotificationCompat.Builder(context, CHANNEL_ID)
+                .setSmallIcon(com.plaintext.audible.R.drawable.ic_stat_pts_book)
+                .setContentTitle(title)
+                .setContentText(body)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+                .setContentIntent(contentPending)
+                .setAutoCancel(true)
+
+            nm.notify(notifId, builder.build())
+        }
+
         fun scheduleDailyCheck(context: Context, targetHour: Int, targetMinute: Int) {
             val now = LocalDateTime.now()
             var nextRun = now.withHour(targetHour).withMinute(targetMinute).withSecond(0)

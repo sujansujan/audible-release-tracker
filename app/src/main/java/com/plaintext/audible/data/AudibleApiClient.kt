@@ -317,13 +317,37 @@ object AudibleApiClient {
         for (authorPart in allAuthors.split(",")) {
             val cleaned = normalizeForAbbComparison(cleanContributorName(authorPart))
             if (cleaned.isBlank() || cleaned == "unknown author" || cleaned == "full cast") continue
-            val words = cleaned.split(Regex("[^a-z0-9]+")).filter { it.length >= 3 }
-            val surnameOrPenName = words.lastOrNull() ?: continue
-            if (surnameOrPenName !in STOP_WORDS && surnameOrPenName !in tokens) {
-                tokens += surnameOrPenName
+            val words = cleaned.split(Regex("[^a-z0-9]+")).filter { it.length >= 3 && it !in STOP_WORDS }
+            // Include surname/pen-name first, plus full-name tokens of 4+ chars
+            words.lastOrNull()?.let { if (it !in tokens) tokens += it }
+            for (w in words) {
+                if (w.length >= 4 && w !in tokens) tokens += w
             }
         }
         return tokens
+    }
+
+    /**
+     * Fetches an AudioBookBay search or post page:
+     * 1) Tries fast `HttpURLConnection` first.
+     * 2) If `HttpURLConnection` gets blocked by Cloudflare (HTTP 403 / Turnstile / missing ABB markers),
+     *    transparently falls back to `AbbWebViewFetcher` (headless Chromium WebView with real TLS + cookies).
+     */
+    private suspend fun fetchAbbPageHtml(url: URL, originUrl: String): String? {
+        val directHtml = executeGetWithRetry(
+            url = url,
+            acceptHtml = true,
+            originUrl = originUrl
+        )
+        if (directHtml != null && (
+                directHtml.contains("postTitle", ignoreCase = true) ||
+                    directHtml.contains("Info Hash", ignoreCase = true) ||
+                    (directHtml.contains("audiobookbay", ignoreCase = true) && directHtml.contains("id=\"content\"", ignoreCase = true))
+                )
+        ) {
+            return directHtml
+        }
+        return AbbWebViewFetcher.fetchHtml(url.toString())
     }
 
     internal fun parseAbbPostedDate(text: String): LocalDate? {
@@ -435,7 +459,7 @@ object AudibleApiClient {
             setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
         )
         val infoHashRegex = Regex(
-            "Info\\s*Hash\\s*:?\\s*</t[dh]>\\s*<td[^>]*>\\s*([a-fA-F0-9]{40})\\s*</td>",
+            "Info\\s*Hash[^a-fA-F0-9]{1,120}([a-fA-F0-9]{40})",
             setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
         )
         val fallbackHashRegex = Regex("\\b([a-fA-F0-9]{40})\\b")
@@ -445,9 +469,8 @@ object AudibleApiClient {
             for (qRaw in candidateQueries) {
                 val encodedQ = URLEncoder.encode(qRaw, "UTF-8")
                 val searchUrl = URL("$mirror/?s=$encodedQ")
-                val searchHtml = executeGetWithRetry(
+                val searchHtml = fetchAbbPageHtml(
                     url = searchUrl,
-                    acceptHtml = true,
                     originUrl = mirror
                 ) ?: continue
 
@@ -531,9 +554,8 @@ object AudibleApiClient {
                         }
 
                         var magnetUri = ""
-                        val postHtml = executeGetWithRetry(
+                        val postHtml = fetchAbbPageHtml(
                             url = URL(fullPostUrl),
-                            acceptHtml = true,
                             originUrl = mirror
                         )
                         if (postHtml != null) {
@@ -931,7 +953,7 @@ object AudibleApiClient {
                     if (acceptHtml) {
                         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
                     } else {
-                        "NocturneTXT/3.1 (Android)"
+                        "NocturneTXT/3.2 (Android)"
                     }
                 )
             }

@@ -96,8 +96,11 @@ class ReleaseRepository(context: Context) {
         private const val ABB_DAILY_INTERVAL_MS = 20L * 60L * 60L * 1000L
     }
 
+    private val appContext = context.applicationContext
+
     init {
-        AudibleApiClient.initCache(context.applicationContext.cacheDir)
+        AudibleApiClient.initCache(appContext.cacheDir)
+        AbbWebViewFetcher.init(appContext)
     }
 
     fun getPrefs(): FilterPrefs = FilterPrefs(
@@ -288,6 +291,18 @@ class ReleaseRepository(context: Context) {
                     postUrl = match.postUrl,
                     magnetUri = match.magnetUri
                 )
+                if (!rel.notifiedAbbAvailable) {
+                    com.plaintext.audible.worker.ReleaseCheckWorker.notifyAbbAvailableNow(
+                        context = appContext,
+                        rel = rel.copy(
+                            abbAvailable = true,
+                            abbPostUrl = match.postUrl,
+                            abbMagnetUri = match.magnetUri
+                        ),
+                        domain = getPrefs().marketplace.domain
+                    )
+                    dao.updateAbbNotifiedFlag(rel.asin, notified = true)
+                }
             }
             match.available
         }
@@ -320,10 +335,11 @@ class ReleaseRepository(context: Context) {
             return dao.getAllReleases()
         }
 
+        var anyFound = false
         abbSemaphore.withPermit {
             for ((index, rel) in candidates.take(10).withIndex()) {
                 if (index > 0) {
-                    delay(1400L)
+                    delay(1200L)
                 }
                 val match = AudibleApiClient.checkAudioBookBayAvailability(
                     bookTitle = rel.title,
@@ -334,17 +350,32 @@ class ReleaseRepository(context: Context) {
                     englishOnly = filterPrefs.englishOnly
                 )
                 if (match.available) {
+                    anyFound = true
                     dao.updateAbbAvailability(
                         asin = rel.asin,
                         available = true,
                         postUrl = match.postUrl,
                         magnetUri = match.magnetUri
                     )
+                    if (!rel.notifiedAbbAvailable) {
+                        com.plaintext.audible.worker.ReleaseCheckWorker.notifyAbbAvailableNow(
+                            context = appContext,
+                            rel = rel.copy(
+                                abbAvailable = true,
+                                abbPostUrl = match.postUrl,
+                                abbMagnetUri = match.magnetUri
+                            ),
+                            domain = filterPrefs.marketplace.domain
+                        )
+                        dao.updateAbbNotifiedFlag(rel.asin, notified = true)
+                    }
                 }
             }
         }
 
-        prefs.edit().putLong("last_abb_check_ms", nowMs).apply()
+        if (anyFound) {
+            prefs.edit().putLong("last_abb_check_ms", nowMs).apply()
+        }
         return dao.getAllReleases()
     }
 
