@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -26,8 +27,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
@@ -41,31 +44,32 @@ import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
 import java.net.URL
 
-private object BitmapCache {
-    private val cache = LruCache<String, ImageBitmap>(80)
-    fun get(url: String): ImageBitmap? = cache.get(url)
+private object ImageMemoryCache {
+    private val lru = LruCache<String, ImageBitmap>(90)
+    fun get(url: String): ImageBitmap? = lru.get(url)
     fun put(url: String, bmp: ImageBitmap) {
-        cache.put(url, bmp)
+        lru.put(url, bmp)
     }
 }
 
 @Composable
-fun RemoteThumbnail(
-    imageUrl: String?,
-    fallbackInitials: String,
+fun CoverThumbnail(
+    url: String,
+    fallbackLabel: String,
     size: Dp = 54.dp,
+    isCircular: Boolean = false,
     onClick: (() -> Unit)? = null
 ) {
-    val palette = LocalPtsColors.current
-    var bitmap by remember(imageUrl) {
-        mutableStateOf(imageUrl?.let { BitmapCache.get(it) })
+    val palette = LocalPtsPalette.current
+    var bitmap by remember(url) {
+        mutableStateOf(if (url.isNotBlank()) ImageMemoryCache.get(url) else null)
     }
 
-    LaunchedEffect(imageUrl) {
-        if (!imageUrl.isNullOrBlank() && bitmap == null) {
+    LaunchedEffect(url) {
+        if (url.isNotBlank() && bitmap == null) {
             withContext(Dispatchers.IO) {
                 runCatching {
-                    val conn = (URL(imageUrl).openConnection() as HttpURLConnection).apply {
+                    val conn = (URL(url).openConnection() as HttpURLConnection).apply {
                         connectTimeout = 7000
                         readTimeout = 7000
                         setRequestProperty("User-Agent", "Mozilla/5.0 (Android 14; Mobile)")
@@ -76,7 +80,7 @@ fun RemoteThumbnail(
                             val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                             if (decoded != null) {
                                 val img = decoded.asImageBitmap()
-                                BitmapCache.put(imageUrl, img)
+                                ImageMemoryCache.put(url, img)
                                 bitmap = img
                             }
                         }
@@ -88,58 +92,67 @@ fun RemoteThumbnail(
         }
     }
 
-    val boxMod = Modifier
+    val shape = if (isCircular) CircleShape else RectangleShape
+    val modifier = Modifier
         .size(size)
-        .background(palette.surface)
-        .border(1.dp, palette.border)
+        .clip(shape)
+        .background(palette.surfaceLine)
+        .border(1.dp, palette.comment, shape)
         .let { m -> if (onClick != null) m.clickable { onClick() } else m }
 
     Box(
-        modifier = boxMod,
+        modifier = modifier,
         contentAlignment = Alignment.Center
     ) {
-        val currentBmp = bitmap
-        if (currentBmp != null) {
+        val bmp = bitmap
+        if (bmp != null) {
             Image(
-                bitmap = currentBmp,
-                contentDescription = fallbackInitials,
+                bitmap = bmp,
+                contentDescription = fallbackLabel,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.size(size)
             )
         } else {
+            val initials = fallbackLabel
+                .trim()
+                .split(" ")
+                .filter { it.isNotBlank() }
+                .take(2)
+                .joinToString("") { it.take(1).uppercase() }
+                .ifBlank { "BK" }
             Text(
-                text = fallbackInitials.take(2).uppercase(),
+                text = initials,
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
-                fontSize = 13.sp,
-                color = palette.muted
+                fontSize = 12.sp,
+                color = palette.comment
             )
         }
     }
 }
 
 @Composable
-fun AsciiRule(char: String = "─") {
-    val palette = LocalPtsColors.current
+fun PtsDivider() {
+    val palette = LocalPtsPalette.current
     HorizontalDivider(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp),
         thickness = 1.dp,
-        color = palette.border
+        color = palette.surfaceLine
     )
 }
 
 @Composable
-fun AsciiSectionHeader(
+fun PtsSectionBanner(
     title: String,
-    rightLabel: String? = null
+    rightText: String = ""
 ) {
-    val palette = LocalPtsColors.current
+    val palette = LocalPtsPalette.current
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 10.dp, bottom = 4.dp)
+            .padding(top = 8.dp, bottom = 4.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -151,46 +164,46 @@ fun AsciiSectionHeader(
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
                 fontSize = 13.sp,
-                color = palette.accent,
+                color = palette.purple,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-            if (!rightLabel.isNullOrBlank()) {
+            if (rightText.isNotBlank()) {
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = rightLabel,
+                    text = rightText,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp,
-                    color = palette.muted
+                    color = palette.comment
                 )
             }
         }
         Spacer(modifier = Modifier.height(3.dp))
-        HorizontalDivider(thickness = 1.dp, color = palette.border)
+        HorizontalDivider(thickness = 1.dp, color = palette.surfaceLine)
     }
 }
 
 @Composable
-fun BracketLink(
+fun PtsBracketButton(
     label: String,
-    active: Boolean = false,
-    accentColor: Color? = null,
+    selected: Boolean = false,
+    color: Color? = null,
     onClick: () -> Unit
 ) {
-    val palette = LocalPtsColors.current
-    val textColor = when {
-        accentColor != null -> accentColor
-        active -> palette.bg
-        else -> palette.accent
+    val palette = LocalPtsPalette.current
+    val fgColor = when {
+        selected -> palette.background
+        color != null -> color
+        else -> palette.cyan
     }
-    val bgColor = if (active) palette.accent else Color.Transparent
+    val bgColor = if (selected) (color ?: palette.purple) else Color.Transparent
 
     Text(
-        text = if (active) "[$label]" else "[ $label ]",
+        text = if (selected) "[$label]" else "[ $label ]",
         fontFamily = FontFamily.Monospace,
-        fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
         fontSize = 12.sp,
-        color = textColor,
+        color = fgColor,
         modifier = Modifier
             .background(bgColor)
             .clickable { onClick() }
@@ -199,7 +212,7 @@ fun BracketLink(
 }
 
 @Composable
-fun StatusTag(
+fun PtsBadge(
     label: String,
     color: Color
 ) {

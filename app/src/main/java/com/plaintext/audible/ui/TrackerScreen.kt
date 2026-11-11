@@ -7,12 +7,11 @@ import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,10 +34,10 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -56,36 +55,39 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.plaintext.audible.data.AudibleApiClient
-import com.plaintext.audible.data.AuthorCatalogSuggestion
-import com.plaintext.audible.data.AuthorEntity
-import com.plaintext.audible.data.BackupManager
+import com.plaintext.audible.data.CacheStats
+import com.plaintext.audible.data.CatalogProduct
+import com.plaintext.audible.data.DndRuleEntity
+import com.plaintext.audible.data.FilterPrefs
 import com.plaintext.audible.data.ReleaseEntity
 import com.plaintext.audible.data.ReleaseRepository
+import com.plaintext.audible.data.TrackType
+import com.plaintext.audible.data.TrackedItemEntity
 import com.plaintext.audible.worker.ReleaseCheckWorker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.time.LocalDate
-import java.time.ZoneId
 import java.time.temporal.ChronoUnit
 import java.util.Date
 import java.util.Locale
 
-enum class TrackerTab(val label: String) {
+private enum class MainTab(val title: String) {
     RELEASES("RELEASES"),
-    AUTHORS("AUTHORS"),
+    TRACKED("TRACKED"),
     CALENDAR("CALENDAR"),
     SETTINGS("SETTINGS")
 }
 
-enum class ReleaseSubFilter(val label: String) {
+private enum class ReleaseFilterMode(val label: String) {
     UPCOMING("UPCOMING"),
-    RECENT("RECENT"),
-    PINNED("PINNED"),
+    OUT_NOW("OUT NOW"),
     ON_ABB("ON ABB"),
+    NEW("NEW"),
     ALL("ALL")
 }
 
@@ -93,315 +95,348 @@ enum class ReleaseSubFilter(val label: String) {
 @Composable
 fun TrackerScreen(
     repo: ReleaseRepository,
-    themeMode: String,
-    onThemeModeChange: (String) -> Unit
+    onExportBackup: () -> Unit,
+    onImportBackup: () -> Unit
 ) {
     val context = LocalContext.current
-    val palette = LocalPtsColors.current
     val scope = rememberCoroutineScope()
 
-    val authors by repo.authorsFlow.collectAsState(initial = emptyList())
-    val releases by repo.releasesFlow.collectAsState(initial = emptyList())
-    val syncLogs by repo.syncLogsFlow.collectAsState(initial = emptyList())
+    var prefs by remember { mutableStateOf(repo.getPrefs()) }
+    val systemDark = isSystemInDarkTheme()
+    val activePalette = remember(prefs.themeModeCode, systemDark) {
+        when (prefs.themeModeCode.uppercase(Locale.US)) {
+            "LIGHT" -> AlucardPalette
+            "DARK" -> DraculaPalette
+            else -> if (systemDark) DraculaPalette else AlucardPalette
+        }
+    }
 
-    var activeTab by rememberSaveable { mutableStateOf(TrackerTab.RELEASES) }
-    var releaseFilter by rememberSaveable { mutableStateOf(ReleaseSubFilter.UPCOMING) }
-    var selectedAuthorFilter by rememberSaveable { mutableStateOf<String?>(null) }
-    var selectedSeriesFilter by rememberSaveable { mutableStateOf<String?>(null) }
-    var searchQuery by rememberSaveable { mutableStateOf("") }
+    val trackedItems by repo.trackedItemsFlow.collectAsState(initial = emptyList())
+    val releases by repo.releasesFlow.collectAsState(initial = emptyList())
+    val dndRules by repo.dndRulesFlow.collectAsState(initial = emptyList())
+
+    var currentTab by rememberSaveable { mutableStateOf(MainTab.RELEASES) }
+    var filterMode by rememberSaveable { mutableStateOf(ReleaseFilterMode.UPCOMING) }
+    var activeAuthorFilter by rememberSaveable { mutableStateOf<String?>(null) }
+    var activeSeriesFilter by rememberSaveable { mutableStateOf<String?>(null) }
+    var searchText by rememberSaveable { mutableStateOf("") }
     var expandedAsin by rememberSaveable { mutableStateOf<String?>(null) }
-    var lightboxImageUrl by remember { mutableStateOf<String?>(null) }
-    var lightboxCaption by remember { mutableStateOf<String?>(null) }
+    var showAboutScreen by rememberSaveable { mutableStateOf(false) }
 
     var isSyncing by remember { mutableStateOf(false) }
-    var statusBanner by remember { mutableStateOf<String?>(null) }
+    var syncStatusLine by remember { mutableStateOf<String?>(null) }
     var checkingAbbAsin by remember { mutableStateOf<String?>(null) }
-    var showAboutSubpage by rememberSaveable { mutableStateOf(false) }
 
-    // Ensure removed authors never leave a ghost filter active
-    LaunchedEffect(authors, selectedAuthorFilter) {
-        if (selectedAuthorFilter != null &&
-            authors.none { it.name.equals(selectedAuthorFilter, ignoreCase = true) }
+    var lightboxUrl by remember { mutableStateOf<String?>(null) }
+    var lightboxTitle by remember { mutableStateOf<String?>(null) }
+
+    // Clear stale author filter if that author is no longer tracked
+    LaunchedEffect(trackedItems, activeAuthorFilter) {
+        if (activeAuthorFilter != null &&
+            trackedItems.none { it.queryValue.equals(activeAuthorFilter, ignoreCase = true) }
         ) {
-            selectedAuthorFilter = null
+            activeAuthorFilter = null
         }
     }
 
-    // Back button behavior for sub-filters / sub-screens
     BackHandler(
-        enabled = showAboutSubpage ||
-            selectedSeriesFilter != null ||
-            selectedAuthorFilter != null ||
-            activeTab != TrackerTab.RELEASES
+        enabled = showAboutScreen ||
+            activeSeriesFilter != null ||
+            activeAuthorFilter != null ||
+            currentTab != MainTab.RELEASES
     ) {
         when {
-            showAboutSubpage -> showAboutSubpage = false
-            selectedSeriesFilter != null -> selectedSeriesFilter = null
-            selectedAuthorFilter != null -> selectedAuthorFilter = null
-            activeTab != TrackerTab.RELEASES -> activeTab = TrackerTab.RELEASES
+            showAboutScreen -> showAboutScreen = false
+            activeSeriesFilter != null -> activeSeriesFilter = null
+            activeAuthorFilter != null -> activeAuthorFilter = null
+            currentTab != MainTab.RELEASES -> currentTab = MainTab.RELEASES
         }
     }
 
-    val todayEpoch = remember { LocalDate.now(ZoneId.systemDefault()).toEpochDay() }
-    val upcomingCount = remember(releases, todayEpoch) {
-        releases.count { it.releaseEpochDay >= todayEpoch }
+    val today = remember { LocalDate.now() }
+    val upcomingCount = remember(releases, today) {
+        releases.count { rel ->
+            val d = runCatching { LocalDate.parse(rel.releaseDateIso) }.getOrNull()
+            d != null && !d.isBefore(today)
+        }
     }
-    val abbReadyCount = remember(releases) {
-        releases.count { it.abbAvailable }
-    }
+    val abbCount = remember(releases) { releases.count { it.abbAvailable } }
+    val newCount = remember(releases) { releases.count { it.isNewDiscovery || it.narratorJustAnnounced } }
 
-    Scaffold(
-        containerColor = palette.bg,
-        contentColor = palette.fg
-    ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(palette.bg)
-                .padding(innerPadding)
-                .padding(horizontal = 12.dp, vertical = 6.dp)
-        ) {
-            // Top Utility Bar (No app name or version in header per design spec)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+    CompositionLocalProvider(LocalPtsPalette provides activePalette) {
+        val palette = LocalPtsPalette.current
+
+        Scaffold(
+            containerColor = palette.background,
+            contentColor = palette.foreground
+        ) { innerPadding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(palette.background)
+                    .padding(innerPadding)
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
             ) {
+                // Top Telemetry & Action Bar (No app name or version in top bar)
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "AUTHORS:${authors.size}",
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 11.sp,
-                        color = palette.muted
-                    )
-                    Text(
-                        text = "UPCOMING:$upcomingCount",
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 11.sp,
-                        color = palette.preorderBadge
-                    )
-                    if (abbReadyCount > 0) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Text(
-                            text = "ABB:$abbReadyCount",
+                            text = "TRACKED:${trackedItems.size}",
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
                             fontSize = 11.sp,
-                            color = palette.outNowBadge
+                            color = palette.comment
                         )
+                        Text(
+                            text = "UPCOMING:$upcomingCount",
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp,
+                            color = palette.cyan
+                        )
+                        if (abbCount > 0) {
+                            Text(
+                                text = "ABB:$abbCount",
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.sp,
+                                color = palette.green
+                            )
+                        }
+                        if (newCount > 0) {
+                            Text(
+                                text = "NEW:$newCount",
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.sp,
+                                color = palette.orange
+                            )
+                        }
                     }
-                }
 
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    if (isSyncing) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(14.dp),
-                            strokeWidth = 2.dp,
-                            color = palette.accent
-                        )
-                    }
-                    BracketLink(
-                        label = if (isSyncing) "SYNCING..." else "SYNC NOW",
-                        accentColor = palette.outNowBadge,
-                        onClick = {
-                            if (!isSyncing) {
-                                scope.launch {
-                                    isSyncing = true
-                                    statusBanner = "Polling Audible & AudioBookBay mirrors..."
-                                    val summary = withContext(Dispatchers.IO) {
-                                        repo.syncAllAuthors(checkAbb = true)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (isSyncing) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(13.dp),
+                                strokeWidth = 2.dp,
+                                color = palette.purple
+                            )
+                        }
+                        PtsBracketButton(
+                            label = if (isSyncing) "SYNCING..." else "SYNC NOW",
+                            color = palette.green,
+                            onClick = {
+                                if (!isSyncing) {
+                                    scope.launch {
+                                        isSyncing = true
+                                        syncStatusLine = "Polling Audible & AudioBookBay mirrors..."
+                                        val batch = repo.syncCatalog(forceRefresh = true, checkAbb = true)
+                                        isSyncing = false
+                                        syncStatusLine =
+                                            "Sync complete (${batch.abbNewlyAvailable.size} new on ABB, ${batch.releaseDay.size} out today)"
                                     }
-                                    isSyncing = false
-                                    statusBanner = "Synced ${summary.authorsChecked} authors (${summary.totalReleases} books, ${summary.newlyAvailableOnAbb.size} new on ABB)"
                                 }
                             }
-                        }
-                    )
-                }
-            }
-
-            if (!statusBanner.isNullOrBlank()) {
-                Text(
-                    text = statusBanner!!,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
-                    color = palette.secondaryAccent,
-                    modifier = Modifier.padding(top = 2.dp, bottom = 2.dp)
-                )
-            }
-
-            AsciiRule()
-
-            // Primary Navigation Tabs
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                TrackerTab.entries.forEach { tab ->
-                    BracketLink(
-                        label = tab.label,
-                        active = activeTab == tab,
-                        onClick = {
-                            activeTab = tab
-                            showAboutSubpage = false
-                        }
-                    )
-                }
-            }
-
-            AsciiRule()
-
-            // Active Tab Body
-            when (activeTab) {
-                TrackerTab.RELEASES -> {
-                    ReleasesTabContent(
-                        releases = releases,
-                        todayEpoch = todayEpoch,
-                        releaseFilter = releaseFilter,
-                        onReleaseFilterChange = { releaseFilter = it },
-                        selectedAuthorFilter = selectedAuthorFilter,
-                        onClearAuthorFilter = { selectedAuthorFilter = null },
-                        selectedSeriesFilter = selectedSeriesFilter,
-                        onSelectSeriesFilter = { selectedSeriesFilter = it },
-                        searchQuery = searchQuery,
-                        onSearchQueryChange = { searchQuery = it },
-                        expandedAsin = expandedAsin,
-                        onToggleExpand = { asin ->
-                            expandedAsin = if (expandedAsin == asin) null else asin
-                        },
-                        checkingAbbAsin = checkingAbbAsin,
-                        onTogglePin = { rel ->
-                            scope.launch(Dispatchers.IO) {
-                                repo.toggleReleasePin(rel.asin, rel.isPinned)
-                            }
-                        },
-                        onToggleMute = { rel ->
-                            scope.launch(Dispatchers.IO) {
-                                repo.setBookAlertMute(rel.asin, !rel.muteBookAlerts)
-                            }
-                        },
-                        onAutoCheckAbb = { rel ->
-                            if (checkingAbbAsin == null) {
-                                scope.launch {
-                                    checkingAbbAsin = rel.asin
-                                    val match = withContext(Dispatchers.IO) {
-                                        repo.checkSingleReleaseOnAbb(rel)
-                                    }
-                                    checkingAbbAsin = null
-                                    Toast.makeText(
-                                        context,
-                                        match.diagnosticMessage,
-                                        Toast.LENGTH_LONG
-                                    ).show()
-                                }
-                            }
-                        },
-                        onOpenAbbBrowserSearch = { rel ->
-                            scope.launch {
-                                val url = withContext(Dispatchers.IO) {
-                                    repo.buildAbbSearchUrl(rel.title, rel.authorName)
-                                }
-                                runCatching {
-                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-                                }
-                            }
-                        },
-                        onShowLightbox = { url, caption ->
-                            lightboxImageUrl = url
-                            lightboxCaption = caption
-                        }
-                    )
-                }
-
-                TrackerTab.AUTHORS -> {
-                    AuthorsTabContent(
-                        repo = repo,
-                        authors = authors,
-                        releases = releases,
-                        onSelectAuthorReleases = { authorName ->
-                            selectedAuthorFilter = authorName
-                            selectedSeriesFilter = null
-                            releaseFilter = ReleaseSubFilter.ALL
-                            activeTab = TrackerTab.RELEASES
-                        },
-                        onShowLightbox = { url, caption ->
-                            lightboxImageUrl = url
-                            lightboxCaption = caption
-                        },
-                        onStatusUpdate = { statusBanner = it }
-                    )
-                }
-
-                TrackerTab.CALENDAR -> {
-                    CalendarTabContent(
-                        releases = releases,
-                        todayEpoch = todayEpoch,
-                        onSelectRelease = { rel ->
-                            selectedAuthorFilter = null
-                            selectedSeriesFilter = null
-                            releaseFilter = ReleaseSubFilter.ALL
-                            expandedAsin = rel.asin
-                            activeTab = TrackerTab.RELEASES
-                        }
-                    )
-                }
-
-                TrackerTab.SETTINGS -> {
-                    if (showAboutSubpage) {
-                        AboutSubscreen(onBack = { showAboutSubpage = false })
-                    } else {
-                        SettingsTabContent(
-                            repo = repo,
-                            syncLogs = syncLogs,
-                            themeMode = themeMode,
-                            onThemeModeChange = onThemeModeChange,
-                            onOpenAbout = { showAboutSubpage = true },
-                            onStatusUpdate = { statusBanner = it }
                         )
                     }
                 }
-            }
-        }
-    }
 
-    // Full-screen Cover / Author Portrait Lightbox Dialog
-    if (!lightboxImageUrl.isNullOrBlank()) {
-        Dialog(onDismissRequest = { lightboxImageUrl = null }) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(palette.bg)
-                    .border(2.dp, palette.accent)
-                    .padding(12.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                RemoteThumbnail(
-                    imageUrl = lightboxImageUrl,
-                    fallbackInitials = "IMG",
-                    size = 260.dp
-                )
-                if (!lightboxCaption.isNullOrBlank()) {
-                    Spacer(modifier = Modifier.height(8.dp))
+                if (!syncStatusLine.isNullOrBlank()) {
                     Text(
-                        text = lightboxCaption!!,
+                        text = syncStatusLine!!,
                         fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp,
-                        color = palette.fg
+                        fontSize = 11.sp,
+                        color = palette.pink,
+                        modifier = Modifier.padding(vertical = 2.dp)
                     )
                 }
-                Spacer(modifier = Modifier.height(8.dp))
-                BracketLink(label = "CLOSE") {
-                    lightboxImageUrl = null
+
+                PtsDivider()
+
+                // Primary Navigation Bar
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    MainTab.entries.forEach { tab ->
+                        PtsBracketButton(
+                            label = tab.title,
+                            selected = currentTab == tab,
+                            onClick = {
+                                currentTab = tab
+                                showAboutScreen = false
+                            }
+                        )
+                    }
+                }
+
+                PtsDivider()
+
+                when (currentTab) {
+                    MainTab.RELEASES -> {
+                        ReleasesView(
+                            releases = releases,
+                            today = today,
+                            prefs = prefs,
+                            filterMode = filterMode,
+                            onFilterModeChange = { filterMode = it },
+                            activeAuthorFilter = activeAuthorFilter,
+                            onClearAuthorFilter = { activeAuthorFilter = null },
+                            activeSeriesFilter = activeSeriesFilter,
+                            onSelectSeriesFilter = { activeSeriesFilter = it },
+                            searchText = searchText,
+                            onSearchTextChange = { searchText = it },
+                            expandedAsin = expandedAsin,
+                            onToggleExpand = { asin ->
+                                expandedAsin = if (expandedAsin == asin) null else asin
+                            },
+                            checkingAbbAsin = checkingAbbAsin,
+                            onCheckAbb = { rel ->
+                                if (checkingAbbAsin == null) {
+                                    scope.launch {
+                                        checkingAbbAsin = rel.asin
+                                        val match = repo.checkSingleReleaseOnAbb(rel)
+                                        checkingAbbAsin = null
+                                        Toast.makeText(
+                                            context,
+                                            match.diagnosticMessage,
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    }
+                                }
+                            },
+                            onMuteBook = { rel ->
+                                scope.launch {
+                                    repo.muteBook(rel.asin, rel.title)
+                                    Toast.makeText(context, "[ Muted ${rel.title} ]", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            onMuteSeries = { rel ->
+                                if (rel.seriesTitle.isNotBlank()) {
+                                    scope.launch {
+                                        repo.muteSeries(rel.seriesTitle, rel.seriesTitle)
+                                        Toast.makeText(context, "[ Muted Series: ${rel.seriesTitle} ]", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            },
+                            onMarkAllSeen = {
+                                scope.launch { repo.markAllSeen() }
+                            },
+                            onOpenLightbox = { url, title ->
+                                lightboxUrl = url
+                                lightboxTitle = title
+                            }
+                        )
+                    }
+
+                    MainTab.TRACKED -> {
+                        TrackedItemsView(
+                            repo = repo,
+                            trackedItems = trackedItems,
+                            releases = releases,
+                            onFilterByAuthorOrNarrator = { query ->
+                                activeAuthorFilter = query
+                                activeSeriesFilter = null
+                                filterMode = ReleaseFilterMode.ALL
+                                currentTab = MainTab.RELEASES
+                            },
+                            onFilterBySeries = { series ->
+                                activeSeriesFilter = series
+                                activeAuthorFilter = null
+                                filterMode = ReleaseFilterMode.ALL
+                                currentTab = MainTab.RELEASES
+                            },
+                            onOpenLightbox = { url, title ->
+                                lightboxUrl = url
+                                lightboxTitle = title
+                            },
+                            onStatusMessage = { syncStatusLine = it }
+                        )
+                    }
+
+                    MainTab.CALENDAR -> {
+                        CalendarScheduleView(
+                            releases = releases,
+                            today = today,
+                            onSelectRelease = { rel ->
+                                activeAuthorFilter = null
+                                activeSeriesFilter = null
+                                filterMode = ReleaseFilterMode.ALL
+                                expandedAsin = rel.asin
+                                currentTab = MainTab.RELEASES
+                            }
+                        )
+                    }
+
+                    MainTab.SETTINGS -> {
+                        if (showAboutScreen) {
+                            AboutView(onBack = { showAboutScreen = false })
+                        } else {
+                            SettingsView(
+                                repo = repo,
+                                prefs = prefs,
+                                dndRules = dndRules,
+                                onUpdatePrefs = { updated ->
+                                    prefs = updated
+                                    repo.savePrefs(updated)
+                                    ReleaseCheckWorker.scheduleDailyCheck(
+                                        context,
+                                        updated.notifyHour,
+                                        updated.notifyMinute
+                                    )
+                                },
+                                onExportBackup = onExportBackup,
+                                onImportBackup = onImportBackup,
+                                onOpenAbout = { showAboutScreen = true },
+                                onStatusMessage = { syncStatusLine = it }
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (!lightboxUrl.isNullOrBlank()) {
+                Dialog(onDismissRequest = { lightboxUrl = null }) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(palette.background)
+                            .border(2.dp, palette.purple)
+                            .padding(12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        CoverThumbnail(
+                            url = lightboxUrl!!,
+                            fallbackLabel = lightboxTitle ?: "IMG",
+                            size = 260.dp
+                        )
+                        if (!lightboxTitle.isNullOrBlank()) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = lightboxTitle!!,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                color = palette.foreground
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        PtsBracketButton(label = "CLOSE") {
+                            lightboxUrl = null
+                        }
+                    }
                 }
             }
         }
@@ -410,49 +445,56 @@ fun TrackerScreen(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ReleasesTabContent(
+private fun ReleasesView(
     releases: List<ReleaseEntity>,
-    todayEpoch: Long,
-    releaseFilter: ReleaseSubFilter,
-    onReleaseFilterChange: (ReleaseSubFilter) -> Unit,
-    selectedAuthorFilter: String?,
+    today: LocalDate,
+    prefs: FilterPrefs,
+    filterMode: ReleaseFilterMode,
+    onFilterModeChange: (ReleaseFilterMode) -> Unit,
+    activeAuthorFilter: String?,
     onClearAuthorFilter: () -> Unit,
-    selectedSeriesFilter: String?,
+    activeSeriesFilter: String?,
     onSelectSeriesFilter: (String?) -> Unit,
-    searchQuery: String,
-    onSearchQueryChange: (String) -> Unit,
+    searchText: String,
+    onSearchTextChange: (String) -> Unit,
     expandedAsin: String?,
     onToggleExpand: (String) -> Unit,
     checkingAbbAsin: String?,
-    onTogglePin: (ReleaseEntity) -> Unit,
-    onToggleMute: (ReleaseEntity) -> Unit,
-    onAutoCheckAbb: (ReleaseEntity) -> Unit,
-    onOpenAbbBrowserSearch: (ReleaseEntity) -> Unit,
-    onShowLightbox: (String, String) -> Unit
+    onCheckAbb: (ReleaseEntity) -> Unit,
+    onMuteBook: (ReleaseEntity) -> Unit,
+    onMuteSeries: (ReleaseEntity) -> Unit,
+    onMarkAllSeen: () -> Unit,
+    onOpenLightbox: (String, String) -> Unit
 ) {
-    val palette = LocalPtsColors.current
+    val palette = LocalPtsPalette.current
     val context = LocalContext.current
 
-    // Sub-filter bar
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(4.dp)
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        ReleaseSubFilter.entries.forEach { sub ->
-            BracketLink(
-                label = sub.label,
-                active = releaseFilter == sub,
-                onClick = { onReleaseFilterChange(sub) }
+        ReleaseFilterMode.entries.forEach { mode ->
+            PtsBracketButton(
+                label = mode.label,
+                selected = filterMode == mode,
+                onClick = { onFilterModeChange(mode) }
+            )
+        }
+        if (releases.any { it.isNewDiscovery || it.narratorJustAnnounced }) {
+            PtsBracketButton(
+                label = "CLEAR NEW",
+                color = palette.orange,
+                onClick = onMarkAllSeen
             )
         }
     }
 
     Spacer(modifier = Modifier.height(6.dp))
 
-    // Active Author or Series drill-down chips
-    if (selectedAuthorFilter != null || selectedSeriesFilter != null) {
+    if (activeAuthorFilter != null || activeSeriesFilter != null) {
         FlowRow(
             modifier = Modifier
                 .fillMaxWidth()
@@ -460,64 +502,64 @@ private fun ReleasesTabContent(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            if (selectedAuthorFilter != null) {
-                BracketLink(
-                    label = "AUTHOR: $selectedAuthorFilter ✕",
-                    accentColor = palette.secondaryAccent,
+            if (activeAuthorFilter != null) {
+                PtsBracketButton(
+                    label = "FILTER: $activeAuthorFilter X",
+                    color = palette.pink,
                     onClick = onClearAuthorFilter
                 )
             }
-            if (selectedSeriesFilter != null) {
-                BracketLink(
-                    label = "SERIES: $selectedSeriesFilter ✕",
-                    accentColor = palette.preorderBadge,
+            if (activeSeriesFilter != null) {
+                PtsBracketButton(
+                    label = "SERIES: $activeSeriesFilter X",
+                    color = palette.cyan,
                     onClick = { onSelectSeriesFilter(null) }
                 )
             }
         }
     }
 
-    // Search box
+    // Search input
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .border(1.dp, palette.border)
-            .background(palette.surface)
+            .border(1.dp, palette.surfaceLine)
+            .background(palette.surfaceLine.copy(alpha = 0.35f))
             .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
-            text = "FILTER > ",
+            text = "FIND > ",
             fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.Bold,
             fontSize = 12.sp,
-            color = palette.accent
+            color = palette.purple
         )
         BasicTextField(
-            value = searchQuery,
-            onValueChange = onSearchQueryChange,
+            value = searchText,
+            onValueChange = onSearchTextChange,
             singleLine = true,
             textStyle = TextStyle(
                 fontFamily = FontFamily.Monospace,
                 fontSize = 12.sp,
-                color = palette.fg
+                color = palette.foreground
             ),
-            cursorBrush = SolidColor(palette.accent),
+            cursorBrush = SolidColor(palette.purple),
             modifier = Modifier.weight(1f),
-            decorationBox = { innerTextField ->
-                if (searchQuery.isEmpty()) {
+            decorationBox = { inner ->
+                if (searchText.isEmpty()) {
                     Text(
                         text = "title, author, series, narrator...",
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp,
-                        color = palette.muted
+                        color = palette.comment
                     )
                 }
-                innerTextField()
+                inner()
             }
         )
-        if (searchQuery.isNotEmpty()) {
-            BracketLink(label = "CLR") { onSearchQueryChange("") }
+        if (searchText.isNotEmpty()) {
+            PtsBracketButton(label = "CLR") { onSearchTextChange("") }
         }
     }
 
@@ -525,46 +567,47 @@ private fun ReleasesTabContent(
 
     val filtered = remember(
         releases,
-        releaseFilter,
-        selectedAuthorFilter,
-        selectedSeriesFilter,
-        searchQuery,
-        todayEpoch
+        filterMode,
+        activeAuthorFilter,
+        activeSeriesFilter,
+        searchText,
+        today
     ) {
-        val base = releases.filter { rel ->
-            val matchAuthor = selectedAuthorFilter == null ||
-                rel.authorName.equals(selectedAuthorFilter, ignoreCase = true)
-            val matchSeries = selectedSeriesFilter == null ||
-                rel.seriesTitle.equals(selectedSeriesFilter, ignoreCase = true)
-            val matchQuery = searchQuery.isBlank() ||
-                rel.title.contains(searchQuery, ignoreCase = true) ||
-                rel.authorName.contains(searchQuery, ignoreCase = true) ||
-                (rel.seriesTitle?.contains(searchQuery, ignoreCase = true) == true) ||
-                rel.narratorName.contains(searchQuery, ignoreCase = true)
+        val list = releases.filter { rel ->
+            val matchAuthor = activeAuthorFilter == null ||
+                rel.authors.contains(activeAuthorFilter, ignoreCase = true) ||
+                rel.narrators.contains(activeAuthorFilter, ignoreCase = true)
+            val matchSeries = activeSeriesFilter == null ||
+                rel.seriesTitle.equals(activeSeriesFilter, ignoreCase = true)
+            val matchQuery = searchText.isBlank() ||
+                rel.title.contains(searchText, ignoreCase = true) ||
+                rel.authors.contains(searchText, ignoreCase = true) ||
+                rel.seriesTitle.contains(searchText, ignoreCase = true) ||
+                rel.narrators.contains(searchText, ignoreCase = true)
 
-            val matchTab = when (releaseFilter) {
-                ReleaseSubFilter.UPCOMING -> rel.releaseEpochDay >= todayEpoch
-                ReleaseSubFilter.RECENT -> rel.releaseEpochDay in (todayEpoch - 90)..todayEpoch
-                ReleaseSubFilter.PINNED -> rel.isPinned
-                ReleaseSubFilter.ON_ABB -> rel.abbAvailable
-                ReleaseSubFilter.ALL -> true
+            val rDate = runCatching { LocalDate.parse(rel.releaseDateIso) }.getOrNull()
+            val matchTab = when (filterMode) {
+                ReleaseFilterMode.UPCOMING -> rDate == null || !rDate.isBefore(today)
+                ReleaseFilterMode.OUT_NOW -> rDate != null && !rDate.isAfter(today)
+                ReleaseFilterMode.ON_ABB -> rel.abbAvailable
+                ReleaseFilterMode.NEW -> rel.isNewDiscovery || rel.narratorJustAnnounced
+                ReleaseFilterMode.ALL -> true
             }
             matchAuthor && matchSeries && matchQuery && matchTab
         }
 
         when {
-            selectedSeriesFilter != null -> {
-                base.sortedWith(
-                    compareBy<ReleaseEntity> {
-                        it.seriesPosition?.toDoubleOrNull() ?: Double.MAX_VALUE
-                    }.thenBy { it.releaseEpochDay }
+            activeSeriesFilter != null -> {
+                list.sortedWith(
+                    compareBy<ReleaseEntity> { it.seriesSequence ?: Int.MAX_VALUE }
+                        .thenBy { it.releaseDateIso }
                 )
             }
-            releaseFilter == ReleaseSubFilter.UPCOMING -> {
-                base.sortedBy { it.releaseEpochDay }
+            filterMode == ReleaseFilterMode.UPCOMING -> {
+                list.sortedBy { it.releaseDateIso }
             }
             else -> {
-                base.sortedByDescending { it.releaseEpochDay }
+                list.sortedByDescending { it.releaseDateIso }
             }
         }
     }
@@ -573,15 +616,14 @@ private fun ReleasesTabContent(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(top = 32.dp),
+                .padding(top = 30.dp),
             contentAlignment = Alignment.TopCenter
         ) {
             Text(
-                text = "No audiobooks match the current filter.
-Add authors in [ AUTHORS ] or switch to [ ALL ].",
+                text = "No audiobooks match the current filter.\nAdd authors or series in [ TRACKED ] or switch to [ ALL ].",
                 fontFamily = FontFamily.Monospace,
                 fontSize = 12.sp,
-                color = palette.muted
+                color = palette.comment
             )
         }
     } else {
@@ -590,18 +632,18 @@ Add authors in [ AUTHORS ] or switch to [ ALL ].",
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             items(filtered, key = { it.asin }) { rel ->
-                ReleaseBoxscoreCard(
+                ReleaseCard(
                     rel = rel,
-                    todayEpoch = todayEpoch,
+                    today = today,
+                    alwaysShowActions = prefs.alwaysShowCardActions,
                     expanded = expandedAsin == rel.asin,
                     isCheckingAbb = checkingAbbAsin == rel.asin,
                     onToggleExpand = { onToggleExpand(rel.asin) },
-                    onTogglePin = { onTogglePin(rel) },
-                    onToggleMute = { onToggleMute(rel) },
-                    onSelectSeries = { series -> onSelectSeriesFilter(series) },
-                    onAutoCheckAbb = { onAutoCheckAbb(rel) },
-                    onOpenAbbBrowserSearch = { onOpenAbbBrowserSearch(rel) },
-                    onShowLightbox = onShowLightbox,
+                    onSelectSeries = { s -> onSelectSeriesFilter(s) },
+                    onCheckAbb = { onCheckAbb(rel) },
+                    onMuteBook = { onMuteBook(rel) },
+                    onMuteSeries = { onMuteSeries(rel) },
+                    onOpenLightbox = onOpenLightbox,
                     context = context
                 )
             }
@@ -611,47 +653,53 @@ Add authors in [ AUTHORS ] or switch to [ ALL ].",
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ReleaseBoxscoreCard(
+private fun ReleaseCard(
     rel: ReleaseEntity,
-    todayEpoch: Long,
+    today: LocalDate,
+    alwaysShowActions: Boolean,
     expanded: Boolean,
     isCheckingAbb: Boolean,
     onToggleExpand: () -> Unit,
-    onTogglePin: () -> Unit,
-    onToggleMute: () -> Unit,
     onSelectSeries: (String) -> Unit,
-    onAutoCheckAbb: () -> Unit,
-    onOpenAbbBrowserSearch: () -> Unit,
-    onShowLightbox: (String, String) -> Unit,
+    onCheckAbb: () -> Unit,
+    onMuteBook: () -> Unit,
+    onMuteSeries: () -> Unit,
+    onOpenLightbox: (String, String) -> Unit,
     context: Context
 ) {
-    val palette = LocalPtsColors.current
-    val deltaDays = rel.releaseEpochDay - todayEpoch
+    val palette = LocalPtsPalette.current
+    val rDate = remember(rel.releaseDateIso) {
+        runCatching { LocalDate.parse(rel.releaseDateIso) }.getOrNull()
+    }
+    val deltaDays = remember(rDate, today) {
+        if (rDate != null) ChronoUnit.DAYS.between(today, rDate) else null
+    }
 
-    val countdownLabel = when {
+    val statusText = when {
+        deltaDays == null -> "TBA"
         deltaDays > 0L -> "IN ${deltaDays}D"
         deltaDays == 0L -> "OUT TODAY"
         else -> "${-deltaDays}D AGO"
     }
-    val badgeColor = when {
-        deltaDays > 0L -> palette.preorderBadge
-        deltaDays == 0L -> palette.outNowBadge
-        else -> palette.muted
+    val statusColor = when {
+        deltaDays == null -> palette.comment
+        deltaDays > 0L -> palette.cyan
+        deltaDays == 0L -> palette.green
+        else -> palette.comment
     }
 
-    val hours = rel.runtimeMinutes / 60
-    val mins = rel.runtimeMinutes % 60
-    val runtimeFormatted = if (rel.runtimeMinutes > 0) "${hours}h ${mins}m" else "TBA"
+    val runtimeText = if (rel.runtimeMinutes > 0) {
+        "${rel.runtimeMinutes / 60}h ${rel.runtimeMinutes % 60}m"
+    } else "TBA"
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .border(1.dp, if (rel.abbAvailable) palette.outNowBadge else palette.border)
-            .background(palette.surface)
+            .border(1.dp, if (rel.abbAvailable) palette.green else palette.surfaceLine)
+            .background(palette.surfaceLine.copy(alpha = 0.25f))
             .clickable { onToggleExpand() }
             .padding(10.dp)
     ) {
-        // Header Row: Date | Status Badges | Pin Marker
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -666,41 +714,33 @@ private fun ReleaseBoxscoreCard(
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
                     fontSize = 12.sp,
-                    color = palette.fg
+                    color = palette.foreground
                 )
-                StatusTag(label = countdownLabel, color = badgeColor)
+                PtsBadge(label = statusText, color = statusColor)
                 if (rel.abbAvailable) {
-                    StatusTag(label = "ON ABB", color = palette.outNowBadge)
+                    PtsBadge(label = "ON ABB", color = palette.green)
                 }
-                if (rel.muteBookAlerts) {
-                    StatusTag(label = "MUTED", color = palette.warning)
+                if (rel.isNewDiscovery) {
+                    PtsBadge(label = "NEW", color = palette.orange)
                 }
-            }
-
-            if (rel.isPinned) {
-                Text(
-                    text = "[★ PINNED]",
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 11.sp,
-                    color = palette.warning
-                )
+                if (rel.narratorJustAnnounced) {
+                    PtsBadge(label = "NARRATOR!", color = palette.pink)
+                }
             }
         }
 
         Spacer(modifier = Modifier.height(6.dp))
 
-        // Main Info Row: Cover Thumbnail + Title/Author/Series/Narrator
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.Top
         ) {
-            RemoteThumbnail(
-                imageUrl = rel.imageUrl,
-                fallbackInitials = rel.title,
+            CoverThumbnail(
+                url = rel.coverUrl,
+                fallbackLabel = rel.title,
                 size = 56.dp,
-                onClick = if (!rel.imageUrl.isNullOrBlank()) {
-                    { onShowLightbox(rel.imageUrl, rel.title) }
+                onClick = if (rel.coverUrl.isNotBlank()) {
+                    { onOpenLightbox(rel.coverUrl, rel.title) }
                 } else null
             )
 
@@ -712,133 +752,143 @@ private fun ReleaseBoxscoreCard(
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
                     fontSize = 14.sp,
-                    color = palette.fg
+                    color = palette.foreground
                 )
-
-                if (!rel.seriesTitle.isNullOrBlank()) {
-                    val posStr = rel.seriesPosition?.let { " #$it" } ?: ""
+                if (rel.seriesTitle.isNotBlank()) {
+                    val seqLabel = rel.seriesSequence?.let { " #$it" }.orEmpty()
                     Text(
-                        text = "Series: ${rel.seriesTitle}$posStr [View Series]",
+                        text = "Series: ${rel.seriesTitle}$seqLabel [Filter Series]",
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp,
-                        color = palette.preorderBadge,
+                        color = palette.cyan,
                         modifier = Modifier
                             .padding(top = 2.dp)
                             .clickable { onSelectSeries(rel.seriesTitle) }
                     )
                 }
-
                 Text(
-                    text = "Author: ${rel.authorName}",
+                    text = "Author: ${rel.authors}",
                     fontFamily = FontFamily.Monospace,
                     fontSize = 12.sp,
-                    color = palette.secondaryAccent,
+                    color = palette.pink,
                     modifier = Modifier.padding(top = 2.dp)
                 )
-
                 Text(
-                    text = "Narrator: ${rel.narratorName} • Len: $runtimeFormatted",
+                    text = "Narrator: ${rel.narrators} • Len: $runtimeText",
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp,
-                    color = palette.muted,
+                    color = palette.comment,
                     modifier = Modifier.padding(top = 2.dp)
                 )
             }
         }
 
-        // Expanded Details Drawer
-        if (expanded) {
+        if (expanded || alwaysShowActions) {
             Spacer(modifier = Modifier.height(8.dp))
-            HorizontalDivider(thickness = 1.dp, color = palette.border)
+            HorizontalDivider(thickness = 1.dp, color = palette.surfaceLine)
             Spacer(modifier = Modifier.height(6.dp))
 
-            if (!rel.summary.isNullOrBlank()) {
+            if (expanded && rel.synopsis.isNotBlank()) {
                 Text(
-                    text = rel.summary,
+                    text = rel.synopsis,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 12.sp,
-                    color = palette.fg,
+                    color = palette.foreground,
                     modifier = Modifier.padding(bottom = 8.dp)
                 )
             }
-
-            Text(
-                text = "ASIN: ${rel.asin} • Marketplace: ${rel.marketplace.uppercase()}",
-                fontFamily = FontFamily.Monospace,
-                fontSize = 11.sp,
-                color = palette.muted,
-                modifier = Modifier.padding(bottom = 6.dp)
-            )
 
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                BracketLink(
-                    label = if (rel.isPinned) "UNPIN" else "PIN",
-                    onClick = onTogglePin
+                PtsBracketButton(
+                    label = if (isCheckingAbb) "CHECKING ABB..." else "CHECK ABB",
+                    color = palette.cyan,
+                    onClick = onCheckAbb
                 )
-                BracketLink(
-                    label = if (rel.muteBookAlerts) "UNMUTE ALERTS" else "MUTE BOOK",
-                    onClick = onToggleMute
-                )
-                BracketLink(
-                    label = "AUDIBLE",
+
+                PtsBracketButton(
+                    label = "ABB SEARCH",
                     onClick = {
+                        val mirror = AudibleApiClient.getOrderedAbbMirrors().first()
+                        val coreTitle = rel.title.substringBefore(":").trim()
+                        val primaryAuthor = rel.authors.substringBefore(",").trim()
+                        val q = URLEncoder.encode(
+                            AudibleApiClient.normalizeForAbbComparison("$coreTitle $primaryAuthor"),
+                            "UTF-8"
+                        )
+                        val url = "$mirror/?s=$q&cat=undefined%2Cundefined"
                         runCatching {
-                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(rel.productUrl)))
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
                         }
                     }
                 )
-                BracketLink(
-                    label = if (isCheckingAbb) "CHECKING ABB..." else "CHECK ABB",
-                    accentColor = palette.preorderBadge,
-                    onClick = onAutoCheckAbb
-                )
-                BracketLink(
-                    label = "ABB SEARCH",
-                    onClick = onOpenAbbBrowserSearch
-                )
 
-                if (!rel.abbUrl.isNullOrBlank()) {
-                    BracketLink(
+                if (rel.abbPostUrl.isNotBlank()) {
+                    PtsBracketButton(
                         label = "ABB POST",
-                        accentColor = palette.outNowBadge,
+                        color = palette.green,
                         onClick = {
                             runCatching {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(rel.abbUrl)))
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(rel.abbPostUrl)))
                             }
                         }
                     )
                 }
 
-                if (!rel.abbMagnetUri.isNullOrBlank()) {
-                    BracketLink(
-                        label = "OPEN MAGNET",
-                        accentColor = palette.outNowBadge,
+                if (rel.abbMagnetUri.isNotBlank()) {
+                    PtsBracketButton(
+                        label = "MAGNET",
+                        color = palette.green,
                         onClick = {
                             runCatching {
                                 context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(rel.abbMagnetUri)))
                             }.onFailure {
-                                val clip = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                clip.setPrimaryClip(ClipData.newPlainText("ABB Magnet", rel.abbMagnetUri))
+                                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                cm.setPrimaryClip(ClipData.newPlainText("ABB Magnet", rel.abbMagnetUri))
                                 Toast.makeText(
                                     context,
-                                    "No torrent app installed; Magnet URI copied to clipboard",
+                                    "Magnet URI copied to clipboard",
                                     Toast.LENGTH_SHORT
                                 ).show()
                             }
                         }
                     )
-                    BracketLink(
+                    PtsBracketButton(
                         label = "COPY MAGNET",
-                        accentColor = palette.secondaryAccent,
+                        color = palette.pink,
                         onClick = {
-                            val clip = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            clip.setPrimaryClip(ClipData.newPlainText("ABB Magnet", rel.abbMagnetUri))
+                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            cm.setPrimaryClip(ClipData.newPlainText("ABB Magnet", rel.abbMagnetUri))
                             Toast.makeText(context, "Magnet URI copied to clipboard", Toast.LENGTH_SHORT).show()
                         }
+                    )
+                }
+
+                PtsBracketButton(
+                    label = "AUDIBLE",
+                    onClick = {
+                        runCatching {
+                            context.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse("https://www.audible.com/pd/${rel.asin}"))
+                            )
+                        }
+                    }
+                )
+
+                PtsBracketButton(
+                    label = "MUTE BOOK",
+                    color = palette.red,
+                    onClick = onMuteBook
+                )
+
+                if (rel.seriesTitle.isNotBlank()) {
+                    PtsBracketButton(
+                        label = "MUTE SERIES",
+                        color = palette.orange,
+                        onClick = onMuteSeries
                     )
                 }
             }
@@ -846,225 +896,229 @@ private fun ReleaseBoxscoreCard(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun AuthorsTabContent(
+private fun TrackedItemsView(
     repo: ReleaseRepository,
-    authors: List<AuthorEntity>,
+    trackedItems: List<TrackedItemEntity>,
     releases: List<ReleaseEntity>,
-    onSelectAuthorReleases: (String) -> Unit,
-    onShowLightbox: (String, String) -> Unit,
-    onStatusUpdate: (String) -> Unit
+    onFilterByAuthorOrNarrator: (String) -> Unit,
+    onFilterBySeries: (String) -> Unit,
+    onOpenLightbox: (String, String) -> Unit,
+    onStatusMessage: (String) -> Unit
 ) {
-    val palette = LocalPtsColors.current
+    val palette = LocalPtsPalette.current
     val scope = rememberCoroutineScope()
 
-    var authorInput by rememberSaveable { mutableStateOf("") }
-    var selectedMarket by rememberSaveable {
-        mutableStateOf(repo.getSetting("default_marketplace", "us"))
-    }
-    var suggestions by remember { mutableStateOf<List<AuthorCatalogSuggestion>>(emptyList()) }
-    var isSearchingSuggestions by remember { mutableStateOf(false) }
-    var isAddingAuthor by remember { mutableStateOf(false) }
+    var selectedType by rememberSaveable { mutableStateOf(TrackType.AUTHOR) }
+    var queryInput by rememberSaveable { mutableStateOf("") }
+    var catalogPreview by remember { mutableStateOf<List<CatalogProduct>>(emptyList()) }
+    var isSearching by remember { mutableStateOf(false) }
     var searchJob by remember { mutableStateOf<Job?>(null) }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        AsciiSectionHeader(
-            title = "TRACK NEW AUDIBLE AUTHOR",
-            rightLabel = "MKT: ${selectedMarket.uppercase()}"
+        PtsSectionBanner(
+            title = "ADD AUTHOR / SERIES / NARRATOR",
+            rightText = selectedType.name
         )
 
-        // Marketplace Picker Row
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.padding(vertical = 4.dp)
         ) {
-            AudibleApiClient.MARKETPLACES.forEach { mkt ->
-                BracketLink(
-                    label = mkt.flagLabel,
-                    active = selectedMarket == mkt.code,
-                    onClick = { selectedMarket = mkt.code }
+            TrackType.entries.forEach { t ->
+                PtsBracketButton(
+                    label = t.name,
+                    selected = selectedType == t,
+                    onClick = {
+                        selectedType = t
+                        catalogPreview = emptyList()
+                    }
                 )
             }
         }
 
-        // Author Search Input Row
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .border(1.dp, palette.border)
-                .background(palette.surface)
+                .border(1.dp, palette.surfaceLine)
+                .background(palette.surfaceLine.copy(alpha = 0.35f))
                 .padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "AUTHOR > ",
+                text = "${selectedType.name} > ",
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
                 fontSize = 12.sp,
-                color = palette.accent
+                color = palette.purple
             )
             BasicTextField(
-                value = authorInput,
-                onValueChange = { newText ->
-                    authorInput = newText
+                value = queryInput,
+                onValueChange = { txt ->
+                    queryInput = txt
                     searchJob?.cancel()
-                    if (newText.trim().length >= 2) {
+                    if (txt.trim().length >= 2) {
                         searchJob = scope.launch {
-                            delay(300L)
-                            isSearchingSuggestions = true
-                            suggestions = withContext(Dispatchers.IO) {
-                                repo.searchCatalogAuthors(newText.trim(), selectedMarket)
+                            delay(320L)
+                            isSearching = true
+                            catalogPreview = withContext(Dispatchers.IO) {
+                                when (selectedType) {
+                                    TrackType.AUTHOR -> AudibleApiClient.searchCatalog(author = txt.trim(), maxPages = 1)
+                                    TrackType.NARRATOR -> AudibleApiClient.searchCatalog(narrator = txt.trim(), maxPages = 1)
+                                    TrackType.SERIES -> AudibleApiClient.searchCatalog(title = txt.trim(), keywords = txt.trim(), maxPages = 1)
+                                    TrackType.BOOK -> AudibleApiClient.searchCatalog(title = txt.trim(), maxPages = 1)
+                                }.take(6)
                             }
-                            isSearchingSuggestions = false
+                            isSearching = false
                         }
                     } else {
-                        suggestions = emptyList()
+                        catalogPreview = emptyList()
                     }
                 },
                 singleLine = true,
                 textStyle = TextStyle(
                     fontFamily = FontFamily.Monospace,
                     fontSize = 12.sp,
-                    color = palette.fg
+                    color = palette.foreground
                 ),
-                cursorBrush = SolidColor(palette.accent),
+                cursorBrush = SolidColor(palette.purple),
                 modifier = Modifier.weight(1f),
                 decorationBox = { inner ->
-                    if (authorInput.isEmpty()) {
+                    if (queryInput.isEmpty()) {
                         Text(
-                            text = "e.g. Shirtaloon, Matt Dinniman, Zogarth...",
+                            text = "Type name and tap [+ TRACK]...",
                             fontFamily = FontFamily.Monospace,
                             fontSize = 12.sp,
-                            color = palette.muted
+                            color = palette.comment
                         )
                     }
                     inner()
                 }
             )
 
-            BracketLink(
-                label = if (isAddingAuthor) "ADDING..." else "+ ADD",
-                accentColor = palette.outNowBadge,
+            PtsBracketButton(
+                label = "+ TRACK",
+                color = palette.green,
                 onClick = {
-                    val trimmed = authorInput.trim()
-                    if (trimmed.isNotEmpty() && !isAddingAuthor) {
+                    val clean = queryInput.trim()
+                    if (clean.isNotEmpty()) {
                         scope.launch {
-                            isAddingAuthor = true
-                            suggestions = emptyList()
-                            onStatusUpdate("Fetching Audible catalog & portrait for $trimmed...")
-                            val count = withContext(Dispatchers.IO) {
-                                repo.addAuthorAndSync(trimmed, selectedMarket)
-                            }
-                            authorInput = ""
-                            isAddingAuthor = false
-                            onStatusUpdate("Added $trimmed ($count new titles synced)")
+                            queryInput = ""
+                            catalogPreview = emptyList()
+                            onStatusMessage("Adding $clean & syncing Audible catalog...")
+                            repo.addTrackedItemUnique(type = selectedType, rawQuery = clean)
+                            repo.syncCatalog(forceRefresh = false, checkAbb = true)
+                            onStatusMessage("Tracked $clean")
                         }
                     }
                 }
             )
         }
 
-        // Live Autocomplete Suggestions Dropdown
-        if (isSearchingSuggestions) {
+        if (isSearching) {
             Text(
-                text = "Searching Audible & Audnexus author directory...",
+                text = "Searching Audible catalog...",
                 fontFamily = FontFamily.Monospace,
                 fontSize = 11.sp,
-                color = palette.muted,
+                color = palette.comment,
                 modifier = Modifier.padding(top = 4.dp)
             )
-        } else if (suggestions.isNotEmpty()) {
+        } else if (catalogPreview.isNotEmpty()) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .border(1.dp, palette.accent)
-                    .background(palette.surface)
+                    .border(1.dp, palette.purple)
+                    .background(palette.surfaceLine.copy(alpha = 0.4f))
                     .padding(6.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 Text(
-                    text = "MATCHING AUTHORS (TAP TO TRACK):",
+                    text = "AUDIBLE CATALOG MATCHES (TAP TO TRACK):",
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
                     fontSize = 11.sp,
-                    color = palette.preorderBadge
+                    color = palette.cyan
                 )
-                suggestions.forEach { sug ->
+                catalogPreview.forEach { prod ->
+                    val targetName = when (selectedType) {
+                        TrackType.AUTHOR -> prod.authors.firstOrNull().orEmpty().ifBlank { queryInput.trim() }
+                        TrackType.NARRATOR -> prod.narrators.firstOrNull().orEmpty().ifBlank { queryInput.trim() }
+                        TrackType.SERIES -> prod.seriesTitle.ifBlank { prod.title }
+                        TrackType.BOOK -> prod.title
+                    }
+                    val extId = when (selectedType) {
+                        TrackType.AUTHOR -> prod.primaryAuthorAsin.ifBlank { null }
+                        TrackType.SERIES -> "${prod.seriesAsin}|${prod.authors.firstOrNull().orEmpty()}"
+                        TrackType.BOOK -> "${prod.asin}|${prod.authors.firstOrNull().orEmpty()}"
+                        else -> null
+                    }
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable {
-                                if (!isAddingAuthor) {
-                                    scope.launch {
-                                        isAddingAuthor = true
-                                        suggestions = emptyList()
-                                        authorInput = ""
-                                        onStatusUpdate("Adding ${sug.name}...")
-                                        val count = withContext(Dispatchers.IO) {
-                                            repo.addAuthorAndSync(
-                                                nameInput = sug.name,
-                                                marketplaceCode = selectedMarket,
-                                                explicitAsin = sug.asin,
-                                                initialImageUrl = sug.imageUrl
-                                            )
-                                        }
-                                        isAddingAuthor = false
-                                        onStatusUpdate("Tracked ${sug.name} ($count books indexed)")
-                                    }
+                                scope.launch {
+                                    queryInput = ""
+                                    catalogPreview = emptyList()
+                                    onStatusMessage("Tracking $targetName...")
+                                    repo.addTrackedItemUnique(
+                                        type = selectedType,
+                                        rawQuery = targetName,
+                                        initialThumbnailUrl = if (selectedType == TrackType.SERIES || selectedType == TrackType.BOOK) prod.coverUrl else "",
+                                        externalId = extId
+                                    )
+                                    repo.syncCatalog(forceRefresh = false, checkAbb = true)
+                                    onStatusMessage("Tracked $targetName")
                                 }
                             }
-                            .padding(vertical = 4.dp),
+                            .padding(vertical = 3.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        RemoteThumbnail(
-                            imageUrl = sug.imageUrl,
-                            fallbackInitials = sug.name,
-                            size = 38.dp
-                        )
+                        CoverThumbnail(url = prod.coverUrl, fallbackLabel = targetName, size = 36.dp)
                         Spacer(modifier = Modifier.width(8.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = sug.name,
+                                text = targetName,
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp,
-                                color = palette.fg
+                                fontSize = 12.sp,
+                                color = palette.foreground,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = "Sample: ${sug.sampleBook}",
+                                text = "${prod.title} (${prod.releaseDateIso})",
                                 fontFamily = FontFamily.Monospace,
                                 fontSize = 11.sp,
-                                color = palette.muted,
+                                color = palette.comment,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
                         Text(
-                            text = "[+ TRACK]",
+                            text = "[+ ADD]",
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
                             fontSize = 11.sp,
-                            color = palette.outNowBadge
+                            color = palette.green
                         )
                     }
                 }
             }
         }
 
-        AsciiSectionHeader(
-            title = "TRACKED AUTHORS (${authors.size})",
-            rightLabel = "TAP AUTHOR TO FILTER BOOKS"
+        PtsSectionBanner(
+            title = "ACTIVE WATCHLIST (${trackedItems.size})",
+            rightText = "TAP TO VIEW RELEASES"
         )
 
-        if (authors.isEmpty()) {
+        if (trackedItems.isEmpty()) {
             Text(
-                text = "No authors tracked yet. Search above to begin tracking.",
+                text = "Your watchlist is empty. Add an author, series, or narrator above.",
                 fontFamily = FontFamily.Monospace,
                 fontSize = 12.sp,
-                color = palette.muted,
+                color = palette.comment,
                 modifier = Modifier.padding(top = 16.dp)
             )
         } else {
@@ -1072,14 +1126,14 @@ private fun AuthorsTabContent(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(authors, key = { it.id }) { author ->
-                    val bookCount = releases.count {
-                        it.authorName.equals(author.name, ignoreCase = true)
-                    }
-                    LaunchedEffect(author.id, author.imageUrl) {
-                        if (author.imageUrl.isNullOrBlank()) {
-                            withContext(Dispatchers.IO) {
-                                repo.refreshAuthorPortrait(author)
+                items(trackedItems, key = { it.id }) { item ->
+                    val matchCount = remember(releases, item) {
+                        releases.count { rel ->
+                            when (item.type) {
+                                TrackType.AUTHOR -> rel.authors.contains(item.queryValue, ignoreCase = true)
+                                TrackType.NARRATOR -> rel.narrators.contains(item.queryValue, ignoreCase = true)
+                                TrackType.SERIES -> rel.seriesTitle.equals(item.queryValue, ignoreCase = true)
+                                TrackType.BOOK -> rel.title.contains(item.queryValue, ignoreCase = true)
                             }
                         }
                     }
@@ -1087,18 +1141,25 @@ private fun AuthorsTabContent(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .border(1.dp, palette.border)
-                            .background(palette.surface)
-                            .clickable { onSelectAuthorReleases(author.name) }
+                            .border(1.dp, palette.surfaceLine)
+                            .background(palette.surfaceLine.copy(alpha = 0.25f))
+                            .clickable {
+                                if (item.type == TrackType.SERIES) {
+                                    onFilterBySeries(item.queryValue)
+                                } else {
+                                    onFilterByAuthorOrNarrator(item.queryValue)
+                                }
+                            }
                             .padding(10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        RemoteThumbnail(
-                            imageUrl = author.imageUrl,
-                            fallbackInitials = author.name,
-                            size = 52.dp,
-                            onClick = if (!author.imageUrl.isNullOrBlank()) {
-                                { onShowLightbox(author.imageUrl, author.name) }
+                        CoverThumbnail(
+                            url = item.thumbnailUrl,
+                            fallbackLabel = item.queryValue,
+                            size = 48.dp,
+                            isCircular = item.type == TrackType.AUTHOR || item.type == TrackType.NARRATOR,
+                            onClick = if (item.thumbnailUrl.isNotBlank()) {
+                                { onOpenLightbox(item.thumbnailUrl, item.queryValue) }
                             } else null
                         )
 
@@ -1106,28 +1167,41 @@ private fun AuthorsTabContent(
 
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = author.name,
+                                text = item.queryValue,
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 14.sp,
-                                color = palette.fg
+                                color = palette.foreground
                             )
                             Text(
-                                text = "Books: $bookCount • Mkt: ${author.marketplace.uppercase()}",
+                                text = "${item.type.name} • $matchCount book(s)",
                                 fontFamily = FontFamily.Monospace,
                                 fontSize = 11.sp,
-                                color = palette.preorderBadge
+                                color = palette.cyan
                             )
-                            if (!author.bio.isNullOrBlank()) {
-                                Text(
-                                    text = author.bio,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 11.sp,
-                                    color = palette.muted,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.padding(top = 2.dp)
-                                )
+                            if (item.type == TrackType.SERIES) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier.padding(top = 4.dp)
+                                ) {
+                                    Text(
+                                        text = "Last Read #${item.lastReadSequence}",
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 11.sp,
+                                        color = palette.comment
+                                    )
+                                    PtsBracketButton(label = "-") {
+                                        scope.launch {
+                                            repo.updateSeriesReadProgress(item.id, item.lastReadSequence - 1)
+                                        }
+                                    }
+                                    PtsBracketButton(label = "+") {
+                                        scope.launch {
+                                            repo.updateSeriesReadProgress(item.id, item.lastReadSequence + 1)
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -1135,21 +1209,21 @@ private fun AuthorsTabContent(
                             horizontalAlignment = Alignment.End,
                             verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            BracketLink(label = "SYNC") {
-                                scope.launch {
-                                    onStatusUpdate("Syncing ${author.name}...")
-                                    withContext(Dispatchers.IO) {
-                                        repo.syncSingleAuthor(author)
+                            if (item.type == TrackType.AUTHOR || item.type == TrackType.NARRATOR) {
+                                PtsBracketButton(label = "IMG") {
+                                    scope.launch {
+                                        onStatusMessage("Refreshing portrait for ${item.queryValue}...")
+                                        repo.refreshSingleTrackedPortrait(item)
+                                        onStatusMessage("Updated portrait for ${item.queryValue}")
                                     }
-                                    onStatusUpdate("Synced ${author.name}")
                                 }
                             }
-                            BracketLink(
+                            PtsBracketButton(
                                 label = "DEL",
-                                accentColor = palette.urgent
+                                color = palette.red
                             ) {
-                                scope.launch(Dispatchers.IO) {
-                                    repo.removeAuthor(author)
+                                scope.launch {
+                                    repo.removeTrackedItem(item)
                                 }
                             }
                         }
@@ -1161,32 +1235,34 @@ private fun AuthorsTabContent(
 }
 
 @Composable
-private fun CalendarTabContent(
+private fun CalendarScheduleView(
     releases: List<ReleaseEntity>,
-    todayEpoch: Long,
+    today: LocalDate,
     onSelectRelease: (ReleaseEntity) -> Unit
 ) {
-    val palette = LocalPtsColors.current
-
-    val upcomingGrouped = remember(releases, todayEpoch) {
+    val palette = LocalPtsPalette.current
+    val grouped = remember(releases, today) {
         releases
-            .filter { it.releaseEpochDay >= todayEpoch - 7 }
-            .sortedBy { it.releaseEpochDay }
-            .groupBy { it.releaseDateIso.take(7) } // YYYY-MM
+            .filter { rel ->
+                val d = runCatching { LocalDate.parse(rel.releaseDateIso) }.getOrNull()
+                d != null && !d.isBefore(today.minusDays(7))
+            }
+            .sortedBy { it.releaseDateIso }
+            .groupBy { it.releaseDateIso.take(7) }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        AsciiSectionHeader(
-            title = "RELEASE SCHEDULE MATRIX",
-            rightLabel = "CHRONOLOGICAL"
+        PtsSectionBanner(
+            title = "CHRONOLOGICAL RELEASE CALENDAR",
+            rightText = "${grouped.values.sumOf { it.size }} TITLES"
         )
 
-        if (upcomingGrouped.isEmpty()) {
+        if (grouped.isEmpty()) {
             Text(
                 text = "No upcoming releases scheduled.",
                 fontFamily = FontFamily.Monospace,
                 fontSize = 12.sp,
-                color = palette.muted,
+                color = palette.comment,
                 modifier = Modifier.padding(top = 16.dp)
             )
         } else {
@@ -1194,28 +1270,19 @@ private fun CalendarTabContent(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                upcomingGrouped.forEach { (yearMonth, monthItems) ->
-                    item(key = "hdr_$yearMonth") {
-                        AsciiSectionHeader(
-                            title = yearMonth,
-                            rightLabel = "${monthItems.size} BOOK(S)"
+                grouped.forEach { (monthKey, itemsInMonth) ->
+                    item(key = "month_$monthKey") {
+                        PtsSectionBanner(
+                            title = monthKey,
+                            rightText = "${itemsInMonth.size} BOOK(S)"
                         )
                     }
-                    items(monthItems, key = { "cal_${it.asin}" }) { rel ->
-                        val delta = ChronoUnit.DAYS.between(
-                            LocalDate.ofEpochDay(todayEpoch),
-                            LocalDate.ofEpochDay(rel.releaseEpochDay)
-                        )
-                        val tag = when {
-                            delta > 0 -> "T-${delta}D"
-                            delta == 0L -> "TODAY"
-                            else -> "${-delta}D AGO"
-                        }
+                    items(itemsInMonth, key = { "cal_${it.asin}" }) { rel ->
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .border(1.dp, palette.border)
-                                .background(palette.surface)
+                                .border(1.dp, palette.surfaceLine)
+                                .background(palette.surfaceLine.copy(alpha = 0.25f))
                                 .clickable { onSelectRelease(rel) }
                                 .padding(8.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -1223,22 +1290,22 @@ private fun CalendarTabContent(
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "${rel.releaseDateIso} [$tag] ${rel.title}",
+                                    text = "${rel.releaseDateIso} • ${rel.title}",
                                     fontFamily = FontFamily.Monospace,
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 12.sp,
-                                    color = palette.fg
+                                    color = palette.foreground
                                 )
                                 Text(
-                                    text = "by ${rel.authorName}" +
-                                        (rel.seriesTitle?.let { " • $it #${rel.seriesPosition ?: ""}" } ?: ""),
+                                    text = "by ${rel.authors}" +
+                                        (if (rel.seriesTitle.isNotBlank()) " (${rel.seriesTitle} #${rel.seriesSequence ?: ""})" else ""),
                                     fontFamily = FontFamily.Monospace,
                                     fontSize = 11.sp,
-                                    color = palette.muted
+                                    color = palette.comment
                                 )
                             }
                             if (rel.abbAvailable) {
-                                StatusTag(label = "ABB", color = palette.outNowBadge)
+                                PtsBadge(label = "ABB", color = palette.green)
                             }
                         }
                     }
@@ -1250,81 +1317,28 @@ private fun CalendarTabContent(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun SettingsTabContent(
+private fun SettingsView(
     repo: ReleaseRepository,
-    syncLogs: List<com.plaintext.audible.data.SyncLogEntity>,
-    themeMode: String,
-    onThemeModeChange: (String) -> Unit,
+    prefs: FilterPrefs,
+    dndRules: List<DndRuleEntity>,
+    onUpdatePrefs: (FilterPrefs) -> Unit,
+    onExportBackup: () -> Unit,
+    onImportBackup: () -> Unit,
     onOpenAbout: () -> Unit,
-    onStatusUpdate: (String) -> Unit
+    onStatusMessage: (String) -> Unit
 ) {
-    val context = LocalContext.current
-    val palette = LocalPtsColors.current
+    val palette = LocalPtsPalette.current
     val scope = rememberCoroutineScope()
+    var cacheStats by remember { mutableStateOf(CacheStats(0, 0L)) }
 
-    var intervalHours by remember {
-        mutableIntStateOf(repo.getSetting("sync_interval_hours", "6").toIntOrNull() ?: 6)
-    }
-    var wifiOnly by remember {
-        mutableStateOf(repo.getSetting("sync_wifi_only", "false") == "true")
-    }
-    var notifyPreorders by remember {
-        mutableStateOf(repo.getSetting("notify_preorders", "true") == "true")
-    }
-    var notifyReleaseDay by remember {
-        mutableStateOf(repo.getSetting("notify_release_day", "true") == "true")
-    }
-    var notifyAbb by remember {
-        mutableStateOf(repo.getSetting("notify_abb", "true") == "true")
-    }
-    var abbEnabled by remember {
-        mutableStateOf(repo.getSetting("abb_check_enabled", "true") == "true")
-    }
-    var abbMirrorsInput by remember {
-        mutableStateOf(
-            repo.getSetting(
-                "abb_mirrors",
-                AudibleApiClient.DEFAULT_ABB_MIRRORS.joinToString(",")
-            )
-        )
+    LaunchedEffect(Unit) {
+        cacheStats = AudibleApiClient.getCacheStats()
     }
 
-    val exportLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.CreateDocument("application/json")
-    ) { uri ->
-        if (uri != null) {
-            scope.launch {
-                val count = withContext(Dispatchers.IO) {
-                    val json = BackupManager.exportBackupJson(
-                        AppDatabase.getInstance(context)
-                    )
-                    context.contentResolver.openOutputStream(uri)?.use { out ->
-                        out.write(json.toByteArray(Charsets.UTF_8))
-                    }
-                    json.length
-                }
-                onStatusUpdate("Exported backup JSON ($count bytes)")
-            }
-        }
-    }
-
-    val importLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri != null) {
-            scope.launch {
-                val restored = withContext(Dispatchers.IO) {
-                    val raw = context.contentResolver.openInputStream(uri)?.use {
-                        it.readBytes().toString(Charsets.UTF_8)
-                    } ?: return@withContext 0
-                    BackupManager.importBackupJson(
-                        AppDatabase.getInstance(context),
-                        raw
-                    )
-                }
-                onStatusUpdate("Restored $restored authors from backup")
-            }
-        }
+    val lastSyncMs = remember { repo.getLastSyncEpochMs() }
+    val lastSyncFormatted = remember(lastSyncMs) {
+        if (lastSyncMs <= 0L) "Never"
+        else SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date(lastSyncMs))
     }
 
     LazyColumn(
@@ -1332,217 +1346,201 @@ private fun SettingsTabContent(
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         item {
-            AsciiSectionHeader(title = "THEME PALETTE (DRACULA / ALUCARD)")
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                listOf(
-                    "system" to "AUTO SYSTEM",
-                    "dark" to "DRACULA DARK",
-                    "light" to "ALUCARD LIGHT"
-                ).forEach { (code, label) ->
-                    BracketLink(
-                        label = label,
-                        active = themeMode == code,
-                        onClick = { onThemeModeChange(code) }
-                    )
-                }
-            }
-        }
-
-        item {
-            AsciiSectionHeader(title = "AUDIOBOOKBAY (ABB) MONITOR")
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Check AudioBookBay during sync",
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
-                    color = palette.fg
-                )
-                BracketLink(
-                    label = if (abbEnabled) "ENABLED" else "DISABLED",
-                    active = abbEnabled,
-                    onClick = {
-                        abbEnabled = !abbEnabled
-                        repo.setSetting("abb_check_enabled", abbEnabled.toString())
-                    }
-                )
-            }
-
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = "ABB Mirrors (comma-separated):",
-                fontFamily = FontFamily.Monospace,
-                fontSize = 11.sp,
-                color = palette.muted
+            PtsSectionBanner(
+                title = "COLOR THEME (DRACULA / ALUCARD)",
+                rightText = prefs.themeModeCode
             )
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, palette.border)
-                    .background(palette.surface)
-                    .padding(6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                BasicTextField(
-                    value = abbMirrorsInput,
-                    onValueChange = { abbMirrorsInput = it },
-                    textStyle = TextStyle(
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp,
-                        color = palette.fg
-                    ),
-                    cursorBrush = SolidColor(palette.accent),
-                    modifier = Modifier.weight(1f)
-                )
-                BracketLink(label = "SAVE") {
-                    repo.setSetting("abb_mirrors", abbMirrorsInput.trim())
-                    Toast.makeText(context, "Saved ABB mirrors", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-
-        item {
-            AsciiSectionHeader(title = "BACKGROUND WORKMANAGER SCHEDULE")
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                listOf(2, 6, 12, 24).forEach { hrs ->
-                    BracketLink(
-                        label = "EVERY ${hrs}H",
-                        active = intervalHours == hrs,
-                        onClick = {
-                            intervalHours = hrs
-                            repo.setSetting("sync_interval_hours", hrs.toString())
-                            ReleaseCheckWorker.schedulePeriodicSync(context, hrs.toLong(), wifiOnly)
-                        }
+                listOf("SYSTEM", "DARK", "LIGHT").forEach { mode ->
+                    PtsBracketButton(
+                        label = mode,
+                        selected = prefs.themeModeCode.equals(mode, ignoreCase = true),
+                        onClick = { onUpdatePrefs(prefs.copy(themeModeCode = mode)) }
                     )
                 }
-                BracketLink(
-                    label = if (wifiOnly) "WIFI ONLY: ON" else "WIFI ONLY: OFF",
-                    active = wifiOnly,
-                    onClick = {
-                        wifiOnly = !wifiOnly
-                        repo.setSetting("sync_wifi_only", wifiOnly.toString())
-                        ReleaseCheckWorker.schedulePeriodicSync(context, intervalHours.toLong(), wifiOnly)
-                    }
-                )
             }
         }
 
         item {
-            AsciiSectionHeader(title = "NOTIFICATION CHANNELS")
+            PtsSectionBanner(title = "CATALOG & AUDIOBOOKBAY FILTERS")
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("New Pre-Order Announcements", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-                    BracketLink(
-                        label = if (notifyPreorders) "ON" else "OFF",
-                        active = notifyPreorders,
-                        onClick = {
-                            notifyPreorders = !notifyPreorders
-                            repo.setSetting("notify_preorders", notifyPreorders.toString())
-                        }
+                    Text("English Releases Only", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                    PtsBracketButton(
+                        label = if (prefs.englishOnly) "ON" else "OFF",
+                        selected = prefs.englishOnly,
+                        onClick = { onUpdatePrefs(prefs.copy(englishOnly = !prefs.englishOnly)) }
                     )
                 }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Release Day Alerts", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-                    BracketLink(
-                        label = if (notifyReleaseDay) "ON" else "OFF",
-                        active = notifyReleaseDay,
-                        onClick = {
-                            notifyReleaseDay = !notifyReleaseDay
-                            repo.setSetting("notify_release_day", notifyReleaseDay.toString())
-                        }
+                    Text("Hide Abridged Editions", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                    PtsBracketButton(
+                        label = if (prefs.hideAbridged) "ON" else "OFF",
+                        selected = prefs.hideAbridged,
+                        onClick = { onUpdatePrefs(prefs.copy(hideAbridged = !prefs.hideAbridged)) }
                     )
                 }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("AudioBookBay Availability Alerts", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-                    BracketLink(
-                        label = if (notifyAbb) "ON" else "OFF",
-                        active = notifyAbb,
-                        onClick = {
-                            notifyAbb = !notifyAbb
-                            repo.setSetting("notify_abb", notifyAbb.toString())
-                        }
+                    Text("Hide Full-Cast / Dramatized", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                    PtsBracketButton(
+                        label = if (prefs.hideDramatized) "ON" else "OFF",
+                        selected = prefs.hideDramatized,
+                        onClick = { onUpdatePrefs(prefs.copy(hideDramatized = !prefs.hideDramatized)) }
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Check AudioBookBay Daily", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                    PtsBracketButton(
+                        label = if (prefs.checkAbbDaily) "ON" else "OFF",
+                        selected = prefs.checkAbbDaily,
+                        onClick = { onUpdatePrefs(prefs.copy(checkAbbDaily = !prefs.checkAbbDaily)) }
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Always Show Action Buttons on Cards", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                    PtsBracketButton(
+                        label = if (prefs.alwaysShowCardActions) "ON" else "OFF",
+                        selected = prefs.alwaysShowCardActions,
+                        onClick = { onUpdatePrefs(prefs.copy(alwaysShowCardActions = !prefs.alwaysShowCardActions)) }
                     )
                 }
             }
         }
 
         item {
-            AsciiSectionHeader(title = "DATABASE BACKUP & RESTORE")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                BracketLink(label = "EXPORT JSON BACKUP") {
-                    exportLauncher.launch("nocturnetxt-backup.json")
-                }
-                BracketLink(label = "IMPORT JSON BACKUP") {
-                    importLauncher.launch(arrayOf("application/json", "text/*"))
+            PtsSectionBanner(
+                title = "DAILY CHECK SCHEDULE",
+                rightText = "%02d:%02d".format(prefs.notifyHour, prefs.notifyMinute)
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                listOf(6, 9, 12, 18, 21).forEach { hr ->
+                    PtsBracketButton(
+                        label = "%02d:00".format(hr),
+                        selected = prefs.notifyHour == hr,
+                        onClick = { onUpdatePrefs(prefs.copy(notifyHour = hr, notifyMinute = 0)) }
+                    )
                 }
             }
-        }
-
-        item {
-            AsciiSectionHeader(title = "APPLICATION METADATA")
-            BracketLink(
-                label = "ABOUT ->",
-                accentColor = palette.preorderBadge,
-                onClick = onOpenAbout
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Last Sync: $lastSyncFormatted",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp,
+                color = palette.comment
             )
         }
 
         item {
-            AsciiSectionHeader(title = "RECENT SYNC TELEMETRY (${syncLogs.size})")
+            PtsSectionBanner(title = "BACKUP, RESTORE & CACHE")
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                PtsBracketButton(label = "EXPORT JSON", onClick = onExportBackup)
+                PtsBracketButton(label = "IMPORT JSON", onClick = onImportBackup)
+                PtsBracketButton(
+                    label = "CLEAR CACHE (${cacheStats.formattedSize})",
+                    color = palette.orange,
+                    onClick = {
+                        scope.launch {
+                            cacheStats = AudibleApiClient.clearAllCaches()
+                            onStatusMessage("Cleared disk & memory caches")
+                        }
+                    }
+                )
+            }
         }
 
-        items(syncLogs) { log ->
-            val fmt = remember { SimpleDateFormat("MM-dd HH:mm", Locale.US) }
-            val ts = fmt.format(Date(log.timestampEpochMillis))
-            Text(
-                text = "[$ts] ${log.statusMessage} (New alerts: ${log.newAlertsCount})",
-                fontFamily = FontFamily.Monospace,
-                fontSize = 11.sp,
-                color = palette.muted
+        if (dndRules.isNotEmpty()) {
+            item {
+                PtsSectionBanner(title = "MUTED BOOKS & SERIES (${dndRules.size})")
+            }
+            items(dndRules, key = { it.targetKey }) { rule ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, palette.surfaceLine)
+                        .padding(6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "[${rule.targetType.name}] ${rule.displayTitle}",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        color = palette.foreground,
+                        modifier = Modifier.weight(1f)
+                    )
+                    PtsBracketButton(
+                        label = "UNMUTE",
+                        color = palette.green
+                    ) {
+                        scope.launch {
+                            repo.removeDndRule(rule)
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            PtsSectionBanner(title = "APPLICATION INFO")
+            PtsBracketButton(
+                label = "ABOUT ->",
+                color = palette.cyan,
+                onClick = onOpenAbout
             )
         }
     }
 }
 
 @Composable
-private fun AboutSubscreen(onBack: () -> Unit) {
-    val palette = LocalPtsColors.current
+private fun AboutView(onBack: () -> Unit) {
+    val palette = LocalPtsPalette.current
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .border(1.dp, palette.border)
-            .background(palette.surface)
+            .border(1.dp, palette.surfaceLine)
+            .background(palette.surfaceLine.copy(alpha = 0.25f))
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        BracketLink(label = "<- BACK TO SETTINGS", onClick = onBack)
+        PtsBracketButton(label = "<- BACK TO SETTINGS", onClick = onBack)
 
-        AsciiRule()
+        PtsDivider()
 
         Text(
             text = "NocturneTXT",
             fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.Bold,
             fontSize = 18.sp,
-            color = palette.accent
+            color = palette.purple
         )
 
         Text(
@@ -1550,31 +1548,27 @@ private fun AboutSubscreen(onBack: () -> Unit) {
             fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.Bold,
             fontSize = 13.sp,
-            color = palette.preorderBadge
+            color = palette.cyan
         )
 
         Text(
             text = "Package: com.plaintext.audible",
             fontFamily = FontFamily.Monospace,
             fontSize = 12.sp,
-            color = palette.muted
+            color = palette.comment
         )
 
-        AsciiRule()
+        PtsDivider()
 
         Text(
-            text = "Design & Architecture:
-" +
-                "• Inspired by Plain Text Sports (plaintextsports.com)
-" +
-                "• Official Dracula Dark & Alucard Light color specifications (draculatheme.com/spec)
-" +
-                "• Public Audible Catalog API + Audnexus Author Directory
-" +
+            text = "Architecture & Credits:\n" +
+                "• Plain-text boxscore UI inspired by Plain Text Sports (plaintextsports.com)\n" +
+                "• Official Dracula Dark & Alucard Light color palettes (draculatheme.com/spec)\n" +
+                "• Audible Catalog API + Audnexus Author Directory\n" +
                 "• AudioBookBay availability verification with WebView Cloudflare fallback & BitTorrent magnet synthesis",
             fontFamily = FontFamily.Monospace,
             fontSize = 12.sp,
-            color = palette.fg
+            color = palette.foreground
         )
     }
 }

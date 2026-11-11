@@ -296,7 +296,7 @@ object AudibleApiClient {
     internal fun buildEnrichedMagnetUri(infoHash: String, displayName: String, postHtml: String): String {
         val cleanHash = infoHash.trim().lowercase(Locale.US)
         val dn = URLEncoder.encode(displayName, "UTF-8")
-        val trackerRegex = Regex("((?:udp|https?)://[^\\"'\\s<>]+/announce)", RegexOption.IGNORE_CASE)
+        val trackerRegex = Regex("((?:udp|https?)://[^\"'\\s<>]+/announce)", RegexOption.IGNORE_CASE)
         val scrapedTrackers = trackerRegex.findAll(postHtml)
             .map { it.groupValues[1].trim() }
             .distinct()
@@ -382,7 +382,7 @@ object AudibleApiClient {
 
         // Broad regexes that capture any ABB post link in search results
         val postLinkRegex = Regex(
-            "<a\\s+[^>]*href=[\\"']([^\\"'#?]+)[\\"'][^>]*>(.*?)</a>",
+            "<a\\s+[^>]*href=[\"']([^\"'#?]+)[\"'][^>]*>(.*?)</a>",
             setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
         )
         val infoHashRegex = Regex(
@@ -636,7 +636,7 @@ object AudibleApiClient {
             )
             val searchHtml = executeGetWithRetry(webSearchUrl, acceptHtml = true)
             if (searchHtml != null) {
-                val asinRegex = Regex("/author/(?:[^/\\"'?]+/)?(B[A-Z0-9]{9})")
+                val asinRegex = Regex("/author/(?:[^/\"'?]+/)?(B[A-Z0-9]{9})")
                 asinRegex.findAll(searchHtml).take(3).forEach { m ->
                     m.groupValues.getOrNull(1)?.takeIf { it.isNotBlank() }?.let { candidateAsins.add(it) }
                 }
@@ -680,26 +680,26 @@ object AudibleApiClient {
             .substringBefore("Most popular")
 
         val amznAuthorMedia = Regex(
-            "https://(?:m\\.media-amazon\\.com|images-na\\.ssl-images-amazon\\.com)/images/S/amzn-author-media[^\\"'\\s>]*"
+            "https://(?:m\\.media-amazon\\.com|images-na\\.ssl-images-amazon\\.com)/images/S/amzn-author-media[^\"'\\s>]*"
         ).find(heroHeaderHtml)?.value.orEmpty()
         if (amznAuthorMedia.startsWith("https://")) return amznAuthorMedia
 
-        val ogRegex = Regex("<meta\\s+[^>]*property=[\\"']og:image[\\"'][^>]*content=[\\"']([^\\"']+)[\\"']", RegexOption.IGNORE_CASE)
-        val ogReverseRegex = Regex("<meta\\s+[^>]*content=[\\"']([^\\"']+)[\\"'][^>]*property=[\\"']og:image[\\"']", RegexOption.IGNORE_CASE)
+        val ogRegex = Regex("<meta\\s+[^>]*property=[\"']og:image[\"'][^>]*content=[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+        val ogReverseRegex = Regex("<meta\\s+[^>]*content=[\"']([^\"']+)[\"'][^>]*property=[\"']og:image[\"']", RegexOption.IGNORE_CASE)
         val ogUrl = ogRegex.find(heroHeaderHtml)?.groupValues?.getOrNull(1)
             ?: ogReverseRegex.find(heroHeaderHtml)?.groupValues?.getOrNull(1)
             ?: ""
         if (isValidAudibleAuthorPortraitUrl(ogUrl)) return ogUrl
 
         val imgTagRegex = Regex(
-            "<img\\s+[^>]*src=[\\"'](https://(?:m\\.media-amazon\\.com|images-na\\.ssl-images-amazon\\.com)/images/I/[^\\"'\\s>]*_RO\\d+[^\\"'\\s>]*\\.(?:jpg|jpeg|png))[\\"'][^>]*>",
+            "<img\\s+[^>]*src=[\"'](https://(?:m\\.media-amazon\\.com|images-na\\.ssl-images-amazon\\.com)/images/I/[^\"'\\s>]*_RO\\d+[^\"'\\s>]*\\.(?:jpg|jpeg|png))[\"'][^>]*>",
             RegexOption.IGNORE_CASE
         )
         val authorSurname = authorName.trim().split(" ").lastOrNull()?.lowercase(Locale.US).orEmpty()
         for (match in imgTagRegex.findAll(heroHeaderHtml)) {
             val fullImgTag = match.value.lowercase(Locale.US)
             val candidateUrl = match.groupValues.getOrNull(1).orEmpty()
-            val altMatch = Regex("alt=[\\"']([^\\"']+)[\\"']").find(fullImgTag)?.groupValues?.getOrNull(1).orEmpty()
+            val altMatch = Regex("alt=[\"']([^\"']+)[\"']").find(fullImgTag)?.groupValues?.getOrNull(1).orEmpty()
             if (altMatch.isNotBlank() && authorSurname.length >= 3 && !altMatch.contains(authorSurname)) {
                 continue
             }
