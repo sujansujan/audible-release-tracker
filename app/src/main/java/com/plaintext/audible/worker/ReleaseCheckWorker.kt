@@ -7,7 +7,6 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -37,10 +36,9 @@ class ReleaseCheckWorker(
     override suspend fun doWork(): Result {
         ensureChannels(appContext)
         val repo = ReleaseRepository(appContext)
-        val prefs = repo.getPrefs()
 
         return try {
-            val batch = repo.syncCatalog(forceRefresh = true, checkAbb = prefs.checkAbbDaily)
+            val batch = repo.syncCatalog(forceRefresh = true)
 
             for (rel in batch.sevenDayOut) {
                 postReleaseNotification(
@@ -69,11 +67,6 @@ class ReleaseCheckWorker(
                     badge = "[NARRATOR ANNOUNCED]",
                     headline = "${rel.title} narrated by ${rel.narrators}"
                 )
-            }
-
-            for (rel in batch.abbNewlyAvailable) {
-                postAbbNotification(rel)
-                repo.markAbbNotified(rel.asin)
             }
 
             Result.success()
@@ -132,7 +125,7 @@ class ReleaseCheckWorker(
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setContentIntent(pendingOpen)
             .setAutoCancel(true)
-            .addAction(0, "Mute Book", pendingMuteBook)
+            .addAction(0, "DND Book", pendingMuteBook)
 
         if (rel.seriesTitle.isNotBlank()) {
             val muteSeriesIntent = Intent(appContext, NotificationMuteReceiver::class.java).apply {
@@ -146,47 +139,7 @@ class ReleaseCheckWorker(
                 muteSeriesIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
-            builder.addAction(0, "Mute Series", pendingMuteSeries)
-        }
-
-        NotificationManagerCompat.from(appContext).notify(notifId, builder.build())
-    }
-
-    private fun postAbbNotification(rel: ReleaseEntity) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(appContext, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            return
-        }
-
-        val notifId = (rel.asin + "_abb").hashCode()
-        val targetUrl = rel.abbPostUrl.ifBlank { "https://www.audible.com/pd/${rel.asin}" }
-        val viewIntent = Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl))
-        val pendingView = PendingIntent.getActivity(
-            appContext,
-            notifId,
-            viewIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val builder = NotificationCompat.Builder(appContext, CHANNEL_ABB)
-            .setSmallIcon(R.drawable.ic_stat_pts_book)
-            .setContentTitle("[ON ABB] ${rel.title}")
-            .setContentText("By ${rel.authors} is now available on AudioBookBay.")
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setContentIntent(pendingView)
-            .setAutoCancel(true)
-            .addAction(0, "Open ABB Post", pendingView)
-
-        if (rel.abbMagnetUri.isNotBlank()) {
-            val magnetIntent = Intent(Intent.ACTION_VIEW, Uri.parse(rel.abbMagnetUri))
-            val pendingMagnet = PendingIntent.getActivity(
-                appContext,
-                (rel.asin + "_abb_mag").hashCode(),
-                magnetIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-            builder.addAction(0, "Magnet", pendingMagnet)
+            builder.addAction(0, "DND Series", pendingMuteSeries)
         }
 
         NotificationManagerCompat.from(appContext).notify(notifId, builder.build())
@@ -197,7 +150,6 @@ class ReleaseCheckWorker(
         private const val UNIQUE_IMMEDIATE_WORK = "pts_audible_immediate_check"
         const val CHANNEL_UPCOMING = "pts_channel_upcoming"
         const val CHANNEL_RELEASE_DAY = "pts_channel_release_day"
-        const val CHANNEL_ABB = "pts_channel_abb"
 
         fun ensureChannels(context: Context) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -212,12 +164,7 @@ class ReleaseCheckWorker(
                     "Release Day Alerts",
                     NotificationManager.IMPORTANCE_HIGH
                 )
-                val c3 = NotificationChannel(
-                    CHANNEL_ABB,
-                    "AudioBookBay Availability Alerts",
-                    NotificationManager.IMPORTANCE_HIGH
-                )
-                nm.createNotificationChannels(listOf(c1, c2, c3))
+                nm.createNotificationChannels(listOf(c1, c2))
             }
         }
 

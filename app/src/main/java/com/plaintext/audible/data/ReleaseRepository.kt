@@ -17,7 +17,7 @@ data class FilterPrefs(
     val hideDramatized: Boolean = false,
     val enableDirectAdd: Boolean = false,
     val alwaysShowCardActions: Boolean = false,
-    val checkAbbDaily: Boolean = true,
+    val checkAbbDaily: Boolean = false,
     val themeModeCode: String = "SYSTEM",
     val notifyHour: Int = 9,
     val notifyMinute: Int = 0,
@@ -27,8 +27,7 @@ data class FilterPrefs(
 data class SyncNotificationBatch(
     val sevenDayOut: List<ReleaseEntity>,
     val releaseDay: List<ReleaseEntity>,
-    val narratorRevealed: List<ReleaseEntity>,
-    val abbNewlyAvailable: List<ReleaseEntity>
+    val narratorRevealed: List<ReleaseEntity>
 )
 
 class ReleaseRepository(context: Context) {
@@ -37,7 +36,6 @@ class ReleaseRepository(context: Context) {
     private val sharedPrefs = appContext.getSharedPreferences("pts_audible_prefs", Context.MODE_PRIVATE)
 
     init {
-        AbbWebViewFetcher.init(appContext)
         AudibleApiClient.initCache(appContext.cacheDir)
     }
 
@@ -52,7 +50,7 @@ class ReleaseRepository(context: Context) {
             hideDramatized = sharedPrefs.getBoolean("hideDramatized", false),
             enableDirectAdd = sharedPrefs.getBoolean("enableDirectAdd", false),
             alwaysShowCardActions = sharedPrefs.getBoolean("alwaysShowCardActions", false),
-            checkAbbDaily = sharedPrefs.getBoolean("checkAbbDaily", true),
+            checkAbbDaily = sharedPrefs.getBoolean("checkAbbDaily", false),
             themeModeCode = sharedPrefs.getString("themeModeCode", "SYSTEM") ?: "SYSTEM",
             notifyHour = sharedPrefs.getInt("notifyHour", 9),
             notifyMinute = sharedPrefs.getInt("notifyMinute", 0),
@@ -126,7 +124,7 @@ class ReleaseRepository(context: Context) {
 
     suspend fun removeTrackedItem(item: TrackedItemEntity) = withContext(Dispatchers.IO) {
         dao.deleteTrackedItem(item)
-        syncCatalog(forceRefresh = false, checkAbb = false)
+        syncCatalog(forceRefresh = false)
     }
 
     suspend fun updateSeriesReadProgress(id: Long, lastReadSeq: Int) = withContext(Dispatchers.IO) {
@@ -167,31 +165,6 @@ class ReleaseRepository(context: Context) {
         dao.updateNotificationFlags(asin, sevenDay, releaseDay)
     }
 
-    suspend fun markAbbNotified(asin: String) = withContext(Dispatchers.IO) {
-        dao.updateAbbNotifiedFlag(asin, true)
-    }
-
-    suspend fun checkSingleReleaseOnAbb(release: ReleaseEntity): AbbMatchResult = withContext(Dispatchers.IO) {
-        val prefs = getPrefs()
-        val match = AudibleApiClient.checkAudioBookBayAvailability(
-            bookTitle = release.title,
-            allAuthors = release.authors,
-            releaseDateIso = release.releaseDateIso,
-            seriesTitle = release.seriesTitle,
-            seriesSequence = release.seriesSequence,
-            englishOnly = prefs.englishOnly
-        )
-        if (match.available) {
-            dao.updateAbbAvailability(
-                asin = release.asin,
-                available = true,
-                postUrl = match.postUrl,
-                magnetUri = match.magnetUri.ifBlank { release.abbMagnetUri }
-            )
-        }
-        match
-    }
-
     suspend fun refreshSingleTrackedPortrait(item: TrackedItemEntity): String = withContext(Dispatchers.IO) {
         val freshUrl = when (item.type) {
             TrackType.AUTHOR -> {
@@ -210,8 +183,7 @@ class ReleaseRepository(context: Context) {
     }
 
     suspend fun syncCatalog(
-        forceRefresh: Boolean = false,
-        checkAbb: Boolean = true
+        forceRefresh: Boolean = false
     ): SyncNotificationBatch = withContext(Dispatchers.IO) {
         val prefs = getPrefs()
         val trackedItems = dao.getAllTrackedItems()
@@ -287,7 +259,6 @@ class ReleaseRepository(context: Context) {
                 }
             }
 
-            // Backfill missing thumbnail for tracked item if needed
             if (item.thumbnailUrl.isBlank() && fetched.isNotEmpty()) {
                 val candidateThumb = when (item.type) {
                     TrackType.AUTHOR -> AudibleApiClient.fetchAudibleAuthorImageUrl(
@@ -302,7 +273,7 @@ class ReleaseRepository(context: Context) {
                 }
             }
 
-            val tagLabel = "${item.type.name}:${item.queryValue}"
+            val tagLabel = item.type.name
             for (prod in fetched) {
                 val entry = groupedProducts.getOrPut(prod.asin) { prod to linkedSetOf() }
                 entry.second.add(tagLabel)
@@ -363,7 +334,7 @@ class ReleaseRepository(context: Context) {
                 language = prod.language.replaceFirstChar { it.titlecase(Locale.US) },
                 isAbridged = isAbridged,
                 isDramatized = isDramatized,
-                matchedTags = tags.joinToString(" | "),
+                matchedTags = tags.joinToString(", "),
                 isNewDiscovery = prev?.isNewDiscovery ?: (existingByAsin.isNotEmpty()),
                 notifiedSevenDay = prev?.notifiedSevenDay ?: false,
                 notifiedReleaseDay = prev?.notifiedReleaseDay ?: false,
@@ -375,10 +346,10 @@ class ReleaseRepository(context: Context) {
                 altAsins = prev?.altAsins.orEmpty(),
                 previousReleaseDateIso = prevDateIso,
                 narratorJustAnnounced = justAnnouncedNarr,
-                abbAvailable = prev?.abbAvailable ?: false,
-                abbPostUrl = prev?.abbPostUrl.orEmpty(),
-                abbMagnetUri = prev?.abbMagnetUri.orEmpty(),
-                notifiedAbbAvailable = prev?.notifiedAbbAvailable ?: false
+                abbAvailable = false,
+                abbPostUrl = "",
+                abbMagnetUri = "",
+                notifiedAbbAvailable = false
             )
             mergedList.add(entity)
             if (prevNarrTba && nowHasNarr) {
@@ -391,7 +362,6 @@ class ReleaseRepository(context: Context) {
         val today = LocalDate.now()
         val sevenDayList = mutableListOf<ReleaseEntity>()
         val releaseDayList = mutableListOf<ReleaseEntity>()
-        val abbNewlyFound = mutableListOf<ReleaseEntity>()
 
         for (rel in mergedList) {
             val rDate = runCatching { LocalDate.parse(rel.releaseDateIso) }.getOrNull() ?: continue
@@ -403,51 +373,13 @@ class ReleaseRepository(context: Context) {
             }
         }
 
-        if (checkAbb && prefs.checkAbbDaily) {
-            val candidates = mergedList.filter { rel ->
-                if (rel.abbAvailable) return@filter false
-                val rDate = runCatching { LocalDate.parse(rel.releaseDateIso) }.getOrNull() ?: return@filter false
-                val daysDiff = ChronoUnit.DAYS.between(rDate, today) // positive if already released
-                daysDiff in -2..60
-            }.sortedByDescending { it.releaseDateIso }.take(8)
-
-            for (cand in candidates) {
-                val match = AudibleApiClient.checkAudioBookBayAvailability(
-                    bookTitle = cand.title,
-                    allAuthors = cand.authors,
-                    releaseDateIso = cand.releaseDateIso,
-                    seriesTitle = cand.seriesTitle,
-                    seriesSequence = cand.seriesSequence,
-                    englishOnly = prefs.englishOnly
-                )
-                if (match.available) {
-                    dao.updateAbbAvailability(
-                        asin = cand.asin,
-                        available = true,
-                        postUrl = match.postUrl,
-                        magnetUri = match.magnetUri
-                    )
-                    val updated = cand.copy(
-                        abbAvailable = true,
-                        abbPostUrl = match.postUrl,
-                        abbMagnetUri = match.magnetUri
-                    )
-                    if (!cand.notifiedAbbAvailable) {
-                        abbNewlyFound.add(updated)
-                    }
-                }
-                delay(350L)
-            }
-        }
-
         AudibleApiClient.pruneStaleDiskCache()
         setLastSyncEpochMs(System.currentTimeMillis())
 
         SyncNotificationBatch(
             sevenDayOut = sevenDayList,
             releaseDay = releaseDayList,
-            narratorRevealed = narratorRevealedList,
-            abbNewlyAvailable = abbNewlyFound
+            narratorRevealed = narratorRevealedList
         )
     }
 }

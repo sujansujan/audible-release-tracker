@@ -6,17 +6,12 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -27,10 +22,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
@@ -45,10 +38,47 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 private object ImageMemoryCache {
-    private val lru = LruCache<String, ImageBitmap>(90)
+    private val lru = LruCache<String, ImageBitmap>(100)
     fun get(url: String): ImageBitmap? = lru.get(url)
     fun put(url: String, bmp: ImageBitmap) {
         lru.put(url, bmp)
+    }
+}
+
+/**
+ * Classic Plain Text Sports ASCII Box Container:
+ * Renders `+---[ TITLE ]---+` directly above a 1dp bordered rectangular frame.
+ */
+@Composable
+fun PlainTextBox(
+    headerText: String,
+    modifier: Modifier = Modifier,
+    headerColor: Color = LocalPtsPalette.current.cyan,
+    borderColor: Color = LocalPtsPalette.current.cyan,
+    onClick: (() -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    val palette = LocalPtsPalette.current
+    Column(modifier = modifier.fillMaxWidth()) {
+        Text(
+            text = "+---[ $headerText ]---+",
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+            fontSize = 12.sp,
+            color = headerColor,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(bottom = 2.dp)
+        )
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, borderColor)
+                .background(palette.background)
+                .let { m -> if (onClick != null) m.clickable { onClick() } else m }
+                .padding(12.dp),
+            content = content
+        )
     }
 }
 
@@ -56,8 +86,8 @@ private object ImageMemoryCache {
 fun CoverThumbnail(
     url: String,
     fallbackLabel: String,
-    size: Dp = 54.dp,
-    isCircular: Boolean = false,
+    size: Dp = 56.dp,
+    borderColor: Color = LocalPtsPalette.current.green,
     onClick: (() -> Unit)? = null
 ) {
     val palette = LocalPtsPalette.current
@@ -92,12 +122,10 @@ fun CoverThumbnail(
         }
     }
 
-    val shape = if (isCircular) CircleShape else RectangleShape
     val modifier = Modifier
         .size(size)
-        .clip(shape)
         .background(palette.surfaceLine)
-        .border(1.dp, palette.comment, shape)
+        .border(1.dp, borderColor)
         .let { m -> if (onClick != null) m.clickable { onClick() } else m }
 
     Box(
@@ -137,50 +165,10 @@ fun PtsDivider() {
     HorizontalDivider(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp),
+            .padding(vertical = 6.dp),
         thickness = 1.dp,
         color = palette.surfaceLine
     )
-}
-
-@Composable
-fun PtsSectionBanner(
-    title: String,
-    rightText: String = ""
-) {
-    val palette = LocalPtsPalette.current
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 8.dp, bottom = 4.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "=== $title ===",
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.Bold,
-                fontSize = 13.sp,
-                color = palette.purple,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            if (rightText.isNotBlank()) {
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = rightText,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
-                    color = palette.comment
-                )
-            }
-        }
-        Spacer(modifier = Modifier.height(3.dp))
-        HorizontalDivider(thickness = 1.dp, color = palette.surfaceLine)
-    }
 }
 
 @Composable
@@ -196,10 +184,10 @@ fun PtsBracketButton(
         color != null -> color
         else -> palette.cyan
     }
-    val bgColor = if (selected) (color ?: palette.purple) else Color.Transparent
+    val bgColor = if (selected) (color ?: palette.cyan) else Color.Transparent
 
     Text(
-        text = if (selected) "[$label]" else "[ $label ]",
+        text = if (selected) "[*$label*]" else "[ $label ]",
         fontFamily = FontFamily.Monospace,
         fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
         fontSize = 12.sp,
@@ -208,19 +196,5 @@ fun PtsBracketButton(
             .background(bgColor)
             .clickable { onClick() }
             .padding(horizontal = 4.dp, vertical = 3.dp)
-    )
-}
-
-@Composable
-fun PtsBadge(
-    label: String,
-    color: Color
-) {
-    Text(
-        text = "[$label]",
-        fontFamily = FontFamily.Monospace,
-        fontWeight = FontWeight.Bold,
-        fontSize = 11.sp,
-        color = color
     )
 }
