@@ -967,8 +967,8 @@ private fun TrackedItemsView(
                                 when (selectedType) {
                                     TrackType.AUTHOR -> AudibleApiClient.searchCatalog(author = txt.trim(), maxPages = 1)
                                     TrackType.NARRATOR -> AudibleApiClient.searchCatalog(narrator = txt.trim(), maxPages = 1)
-                                    TrackType.SERIES -> AudibleApiClient.searchCatalog(title = txt.trim(), keywords = txt.trim(), maxPages = 1)
-                                    TrackType.BOOK -> AudibleApiClient.searchCatalog(title = txt.trim(), maxPages = 1)
+                                    TrackType.SERIES -> AudibleApiClient.searchCatalog(titleOrSeries = txt.trim(), maxPages = 1)
+                                    TrackType.BOOK -> AudibleApiClient.searchCatalog(titleOrSeries = txt.trim(), maxPages = 1)
                                 }.take(6)
                             }
                             isSearching = false

@@ -105,7 +105,7 @@ class ReleaseRepository(context: Context) {
             when (type) {
                 TrackType.AUTHOR -> AudibleApiClient.fetchAudibleAuthorImageUrl(
                     authorName = canonical,
-                    authorAsinHint = externalId?.substringBefore("|").orEmpty()
+                    knownAuthorAsin = externalId?.substringBefore("|").orEmpty()
                 ).orEmpty()
                 TrackType.NARRATOR -> AudibleApiClient.fetchNarratorPortraitUrl(canonical).orEmpty()
                 else -> ""
@@ -195,13 +195,9 @@ class ReleaseRepository(context: Context) {
     suspend fun refreshSingleTrackedPortrait(item: TrackedItemEntity): String = withContext(Dispatchers.IO) {
         val freshUrl = when (item.type) {
             TrackType.AUTHOR -> {
-                val sampleBookAsin = dao.getAllReleases()
-                    .firstOrNull { it.authors.contains(item.queryValue, ignoreCase = true) }
-                    ?.asin.orEmpty()
                 AudibleApiClient.fetchAudibleAuthorImageUrl(
                     authorName = item.queryValue,
-                    authorAsinHint = item.pinnedAsin,
-                    sampleBookAsin = sampleBookAsin
+                    knownAuthorAsin = item.pinnedAsin
                 ).orEmpty()
             }
             TrackType.NARRATOR -> AudibleApiClient.fetchNarratorPortraitUrl(item.queryValue).orEmpty()
@@ -263,8 +259,7 @@ class ReleaseRepository(context: Context) {
                 }
 
                 TrackType.SERIES -> AudibleApiClient.searchCatalog(
-                    title = item.queryValue,
-                    keywords = item.queryValue,
+                    titleOrSeries = item.queryValue,
                     maxPages = 2,
                     forceRefresh = forceRefresh
                 ).filter { prod ->
@@ -284,7 +279,7 @@ class ReleaseRepository(context: Context) {
                         )
                     } else {
                         AudibleApiClient.searchCatalog(
-                            title = item.queryValue,
+                            titleOrSeries = item.queryValue,
                             maxPages = 1,
                             forceRefresh = forceRefresh
                         )
@@ -297,8 +292,7 @@ class ReleaseRepository(context: Context) {
                 val candidateThumb = when (item.type) {
                     TrackType.AUTHOR -> AudibleApiClient.fetchAudibleAuthorImageUrl(
                         authorName = item.queryValue,
-                        authorAsinHint = fetched.first().primaryAuthorAsin,
-                        sampleBookAsin = fetched.first().asin
+                        knownAuthorAsin = fetched.first().primaryAuthorAsin
                     ).orEmpty()
                     TrackType.NARRATOR -> AudibleApiClient.fetchNarratorPortraitUrl(item.queryValue).orEmpty()
                     else -> fetched.firstOrNull { it.coverUrl.isNotBlank() }?.coverUrl.orEmpty()
