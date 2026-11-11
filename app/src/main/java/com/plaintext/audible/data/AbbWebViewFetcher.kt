@@ -12,15 +12,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONTokener
 
-/**
- * Headless Android WebView HTML Fetcher with Cloudflare JS/Cookie Support.
- *
- * Why this is needed:
- * AudioBookBay (`audiobookbay.lu` / `.is` / `.fi`) sits behind Cloudflare Bot Management,
- * which fingerprints Java's `HttpURLConnection` TLS (JA3) and blocks it with HTTP 403.
- * Android's built-in Chromium `WebView` uses genuine BoringSSL TLS + real V8 JavaScript
- * and shares `CookieManager` (`cf_clearance`), bypassing Cloudflare transparently in the background.
- */
 object AbbWebViewFetcher {
     @Volatile
     private var appContext: Context? = null
@@ -63,9 +54,11 @@ object AbbWebViewFetcher {
 
                 val resultHtml = withTimeoutOrNull(timeoutMs) {
                     var lastHtml = ""
+                    var pollsAfterFinish = 0
                     while (true) {
                         delay(450L)
                         if (pageFinished) {
+                            pollsAfterFinish++
                             val html = evaluateOuterHtml(wv)
                             if (html.isNotBlank()) {
                                 lastHtml = html
@@ -73,8 +66,15 @@ object AbbWebViewFetcher {
                                     html.contains("Just a moment...", ignoreCase = true) ||
                                         html.contains("cf-browser-verification", ignoreCase = true) ||
                                         html.contains("Checking your browser", ignoreCase = true) ||
-                                        html.contains("challenge-platform", ignoreCase = true) && !html.contains("postTitle", ignoreCase = true)
-                                if (!isCloudflareChallenge && (html.contains("postTitle", ignoreCase = true) || html.contains("Info Hash", ignoreCase = true) || html.contains("id=\"content\"", ignoreCase = true))) {
+                                        (html.contains("challenge-platform", ignoreCase = true) && !html.contains("postTitle", ignoreCase = true))
+                                if (!isCloudflareChallenge && (
+                                        html.contains("postTitle", ignoreCase = true) ||
+                                            html.contains("Info Hash", ignoreCase = true) ||
+                                            html.contains("audio-books", ignoreCase = true) ||
+                                            html.contains("/abss/", ignoreCase = true) ||
+                                            pollsAfterFinish >= 4
+                                        )
+                                ) {
                                     return@withTimeoutOrNull html
                                 }
                             }
