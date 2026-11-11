@@ -20,7 +20,7 @@ data class PtsPalette(
     val yellow: Color
 )
 
-// Official Dracula Dark specification (https://draculatheme.com/spec)
+// Official Dracula Dark Palette (https://draculatheme.com/spec)
 val DraculaPalette = PtsPalette(
     name = "DRACULA",
     background = Color(0xFF282A36),
@@ -36,11 +36,11 @@ val DraculaPalette = PtsPalette(
     yellow = Color(0xFFF1FA8C)
 )
 
-// Official Alucard Light specification (https://draculatheme.com/spec)
+// Official Alucard Light Palette (https://github.com/dracula/dracula-theme)
 val AlucardPalette = PtsPalette(
     name = "ALUCARD",
     background = Color(0xFFFFFBEB),
-    surfaceLine = Color(0xFFEDE8D0),
+    surfaceLine = Color(0xFFCFCFDE),
     foreground = Color(0xFF1F1F1F),
     comment = Color(0xFF6C664B),
     cyan = Color(0xFF036A96),

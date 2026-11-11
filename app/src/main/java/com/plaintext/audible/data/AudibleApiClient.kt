@@ -13,6 +13,8 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+import java.time.format.DateTimeFormatterBuilder
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.GZIPInputStream
@@ -43,8 +45,7 @@ data class CatalogProduct(
 data class AbbMatchResult(
     val available: Boolean,
     val postUrl: String = "",
-    val magnetUri: String = "",
-    val diagnosticMessage: String = ""
+    val magnetUri: String = ""
 )
 
 @Immutable
@@ -71,7 +72,7 @@ object AudibleApiClient {
     private const val DISK_CACHE_TTL_MS = 12L * 60L * 60L * 1000L
     private const val PRUNE_MAX_AGE_MS = 30L * 24L * 60L * 60L * 1000L
     private const val PRUNE_MAX_BYTES = 15L * 1024L * 1024L
-    private const val CACHE_DIR_NAME = "audible_catalog_json_v33"
+    private const val CACHE_DIR_NAME = "audible_catalog_json_v26"
 
     private val ABB_MIRRORS = listOf(
         "https://audiobookbay.lu",
@@ -80,58 +81,15 @@ object AudibleApiClient {
         "https://theaudiobookbay.se"
     )
 
-    private val DEFAULT_PUBLIC_TRACKERS = listOf(
-        "udp://tracker.opentrackr.org:1337/announce",
-        "udp://open.stealth.si:80/announce",
-        "udp://tracker.torrent.eu.org:451/announce",
-        "udp://exodus.desync.com:6969/announce",
-        "udp://tracker.openbittorrent.com:6969/announce"
-    )
-
-    @Volatile
-    var preferredAbbMirror: String = ABB_MIRRORS.first()
-        private set
-
-    fun getOrderedAbbMirrors(): List<String> {
-        val pref = preferredAbbMirror
-        return listOf(pref) + ABB_MIRRORS.filter { it != pref }
-    }
-
     private val STOP_WORDS = setOf(
         "the", "and", "with", "for", "from", "into", "that", "this", "who", "what",
         "when", "where", "why", "how", "book", "volume", "vol", "part", "series", "novel", "audiobook"
     )
 
-    private val NUMBER_EQUIVALENTS: Map<Int, List<String>> = mapOf(
-        1 to listOf("1", "01", "one", "i"),
-        2 to listOf("2", "02", "two", "ii"),
-        3 to listOf("3", "03", "three", "iii"),
-        4 to listOf("4", "04", "four", "iv"),
-        5 to listOf("5", "05", "five", "v"),
-        6 to listOf("6", "06", "six", "vi"),
-        7 to listOf("7", "07", "seven", "vii"),
-        8 to listOf("8", "08", "eight", "viii"),
-        9 to listOf("9", "09", "nine", "ix"),
-        10 to listOf("10", "ten", "x"),
-        11 to listOf("11", "eleven", "xi"),
-        12 to listOf("12", "twelve", "xii"),
-        13 to listOf("13", "thirteen", "xiii"),
-        14 to listOf("14", "fourteen", "xiv"),
-        15 to listOf("15", "fifteen", "xv"),
-        16 to listOf("16", "sixteen", "xvi"),
-        17 to listOf("17", "seventeen", "xvii"),
-        18 to listOf("18", "eighteen", "xviii"),
-        19 to listOf("19", "nineteen", "xix"),
-        20 to listOf("20", "twenty", "xx")
-    )
-
-    private val WORD_TO_NUMBER: Map<String, Int> = buildMap {
-        for ((num, tokens) in NUMBER_EQUIVALENTS) {
-            for (tok in tokens) {
-                put(tok, num)
-            }
-        }
-    }
+    private val abbPostedDateFormatter: DateTimeFormatter = DateTimeFormatterBuilder()
+        .parseCaseInsensitive()
+        .appendPattern("d MMM yyyy")
+        .toFormatter(Locale.US)
 
     private val memoryCache = object : LruCache<String, List<CatalogProduct>>(140) {}
     private val personPortraitCache = object : LruCache<String, String>(160) {}
@@ -161,7 +119,7 @@ object AudibleApiClient {
         rootCacheDir = baseCacheDir
         diskCacheDir = File(baseCacheDir, CACHE_DIR_NAME).apply { mkdirs() }
         runCatching {
-            listOf("audible_catalog_json", "audible_catalog_json_v19", "audible_catalog_json_v24", "audible_catalog_json_v26").forEach { oldName ->
+            listOf("audible_catalog_json", "audible_catalog_json_v19", "audible_catalog_json_v24").forEach { oldName ->
                 File(baseCacheDir, oldName).listFiles()?.forEach { it.delete() }
             }
         }
@@ -220,130 +178,57 @@ object AudibleApiClient {
         }
     }
 
-    internal fun normalizeForAbbComparison(raw: String): String {
-        return raw.lowercase(Locale.US)
-            .replace("’", "")
-            .replace("'", "")
-            .replace("&", " and ")
-            .replace(Regex("\\s+"), " ")
-            .trim()
-    }
-
-    internal fun extractSignificantWords(raw: String): List<String> {
-        val norm = normalizeForAbbComparison(raw)
-        return norm.split(Regex("[^a-z0-9]+"))
-            .filter { w ->
-                w.length >= 3 &&
-                    w !in STOP_WORDS &&
-                    !w.all { ch -> ch.isDigit() } &&
-                    w !in WORD_TO_NUMBER
-            }
-    }
-
-    internal fun containsEquivalentNumber(text: String, targetNumber: Int): Boolean {
-        val norm = normalizeForAbbComparison(text)
-        val equivalents = NUMBER_EQUIVALENTS[targetNumber] ?: listOf(targetNumber.toString(), targetNumber.toString().padStart(2, '0'))
-        for (tok in equivalents) {
-            if (tok in setOf("i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x")) {
-                if (Regex("\\b(?:book|vol|volume|part|#)\\s*$tok\\b").containsMatchIn(norm)) {
-                    return true
-                }
-            } else {
-                if (Regex("\\b$tok\\b").containsMatchIn(norm)) {
-                    return true
-                }
-            }
-        }
-        return false
-    }
-
-    internal fun isForeignLanguageAbbPost(postContextPlain: String, linkTitle: String): Boolean {
-        val langMatch = Regex("Language\\s*:\\s*([A-Za-z]+)", RegexOption.IGNORE_CASE).find(postContextPlain)
-        if (langMatch != null) {
-            val lang = langMatch.groupValues.getOrNull(1)?.trim().orEmpty()
-            if (lang.isNotBlank() && !lang.equals("English", ignoreCase = true)) {
-                return true
-            }
-        }
-        val foreignTagRegex = Regex("\\b(german|spanish|español|espanol|french|français|francais|italian|italiano|portuguese|russian|polish|dutch|hörbuch|horbuch)\\b", RegexOption.IGNORE_CASE)
-        return foreignTagRegex.containsMatchIn(linkTitle)
-    }
-
+    /**
+     * Extracts required author verification tokens (surnames / pen-names of each listed author,
+     * NEVER narrator names or "Full cast") so common narrator names like "Ray Porter" or "John"
+     * never cause a false positive on 1-word titles like "Exoplanet".
+     */
     internal fun extractAuthorVerificationTokens(allAuthors: String): List<String> {
         val tokens = mutableListOf<String>()
         for (authorPart in allAuthors.split(",")) {
-            val cleaned = normalizeForAbbComparison(cleanContributorName(authorPart))
+            val cleaned = cleanContributorName(authorPart).lowercase(Locale.US).trim()
             if (cleaned.isBlank() || cleaned == "unknown author" || cleaned == "full cast") continue
-            val words = cleaned.split(Regex("[^a-z0-9]+")).filter { it.length >= 3 && it !in STOP_WORDS }
-            words.lastOrNull()?.let { if (it !in tokens) tokens += it }
-            for (w in words) {
-                if (w.length >= 4 && w !in tokens) tokens += w
+            val words = cleaned.split(Regex("[^a-z0-9]+")).filter { it.length >= 3 }
+            val surnameOrPenName = words.lastOrNull() ?: continue
+            if (surnameOrPenName !in STOP_WORDS && surnameOrPenName !in tokens) {
+                tokens += surnameOrPenName
             }
         }
         return tokens
     }
 
     /**
-     * Extracts the 4-digit year from `Posted: DD Mmm YYYY` on AudioBookBay so we can reject
-     * old multi-year-old uploads (like 2019 Exoplanet) without failing on month/day formatting quirks.
+     * Parses AudioBookBay's `Posted: DD Mmm YYYY` date (e.g. `Posted: 6 Oct 2026` or `Posted: 12 Mar 2019`)
+     * from a post snippet or details page.
      */
-    internal fun extractAbbPostedYear(text: String): Int? {
-        val match = Regex("Posted\\s*:\\s*\\d{1,2}\\s+[A-Za-z]{3,10}\\s+(\\d{4})", RegexOption.IGNORE_CASE).find(text)
-            ?: return null
-        return match.groupValues.getOrNull(1)?.toIntOrNull()
-    }
-
-    internal fun buildEnrichedMagnetUri(infoHash: String, displayName: String, postHtml: String): String {
-        val cleanHash = infoHash.trim().lowercase(Locale.US)
-        val dn = URLEncoder.encode(displayName, "UTF-8")
-        val trackerRegex = Regex("((?:udp|https?)://[^\"'\\s<>]+/announce)", RegexOption.IGNORE_CASE)
-        val scrapedTrackers = trackerRegex.findAll(postHtml)
-            .map { it.groupValues[1].trim() }
-            .distinct()
-            .take(8)
-            .toList()
-
-        val trackersToUse = (scrapedTrackers + DEFAULT_PUBLIC_TRACKERS).distinct().take(8)
-        val trParams = trackersToUse.joinToString("") { tr ->
-            "&tr=${URLEncoder.encode(tr, "UTF-8")}"
-        }
-        return "magnet:?xt=urn:btih:$cleanHash&dn=$dn$trParams"
-    }
-
-    private suspend fun fetchAbbPageHtml(url: URL, refererUrl: String): String? {
-        val directHtml = executeGetWithRetry(
-            url = url,
-            acceptHtml = true,
-            refererUrl = refererUrl
-        )
-        if (directHtml != null &&
-            !directHtml.contains("Just a moment...", ignoreCase = true) &&
-            !directHtml.contains("cf-browser-verification", ignoreCase = true) &&
-            (directHtml.contains("postTitle", ignoreCase = true) ||
-                directHtml.contains("Info Hash", ignoreCase = true) ||
-                directHtml.contains("/audio-books/", ignoreCase = true) ||
-                directHtml.contains("/abss/", ignoreCase = true))
-        ) {
-            return directHtml
-        }
-        return AbbWebViewFetcher.fetchHtml(url.toString())
+    internal fun parseAbbPostedDate(text: String): LocalDate? {
+        val match = Regex("Posted:\\s*(\\d{1,2}\\s+[A-Za-z]{3,9}\\s+\\d{4})", RegexOption.IGNORE_CASE)
+            .find(text) ?: return null
+        val rawDate = match.groupValues.getOrNull(1)?.trim()?.replace(Regex("\\s+"), " ") ?: return null
+        // Normalize month token to first 3 letters (e.g. "October" -> "Oct")
+        val parts = rawDate.split(" ")
+        if (parts.size != 3) return null
+        val normalized = "${parts[0]} ${parts[1].take(3)} ${parts[2]}"
+        return runCatching { LocalDate.parse(normalized, abbPostedDateFormatter) }.getOrNull()
     }
 
     /**
-     * Fixed & Diagnostic AudioBookBay Availability Checker (v3.3):
-     * - Restores `&cat=undefined%2Cundefined` on search URLs (`https://audiobookbay.lu/?s=...&cat=undefined%2Cundefined`).
-     * - Broadly extracts all candidate post links (`<h2><a href="...">`, `<div class="postTitle">`, `/audio-books/`, `/abss/`).
-     * - Allows 1-word tolerance on 3+ word titles so minor punctuation/word variations never miss.
-     * - Verifies author token (surname/pen-name) in either the post link title or surrounding card snippet.
-     * - Rejects old uploads whose `Posted:` year is strictly before `releaseYear - 1`.
+     * Precision AudioBookBay Availability & Magnet Checker:
+     * 1) Only requires a number in the ABB post title if that number is actually part of `coreTitle`
+     *    (fixes *Tales from the Territory*, which is `Legends & Lattes #5` on Audible but has no `5` in its title).
+     * 2) Strictly requires at least one **Author** surname/pen-name (`extractAuthorVerificationTokens(allAuthors)`)
+     *    to match as a whole word (`...`) in the ABB post title or post block—never narrator/cast names.
+     * 3) Verifies the ABB `Posted:` date against `releaseDateIso`: if an ABB upload has a `Posted:` date more than
+     *    10 days *before* the book's Audible release date, it is an older unrelated book (fixes *Exoplanet*).
+     * 4) Only marks a mirror as valid if it returned actual ABB page structure (`postTitle` / `id="content"`),
+     *    falling back across `.lu`, `.is`, `.fi`, and `.se` if Cloudflare challenges the first mirror.
      */
     suspend fun checkAudioBookBayAvailability(
         bookTitle: String,
         allAuthors: String,
         releaseDateIso: String = "",
         seriesTitle: String = "",
-        seriesSequence: Int? = null,
-        englishOnly: Boolean = true
+        seriesSequence: Int? = null
     ): AbbMatchResult = withContext(Dispatchers.IO) {
         val coreTitle = bookTitle
             .substringBefore(":")
@@ -351,136 +236,117 @@ object AudibleApiClient {
             .replace(Regex("\\[.*?\\]"), "")
             .replace(Regex("\\s+"), " ")
             .trim()
-        if (coreTitle.isBlank()) return@withContext AbbMatchResult(false, diagnosticMessage = "Empty title")
+        if (coreTitle.isBlank()) return@withContext AbbMatchResult(false)
 
-        val releaseYear = runCatching { LocalDate.parse(releaseDateIso).year }.getOrNull()
+        val releaseDate = runCatching { LocalDate.parse(releaseDateIso) }.getOrNull()
+        val earliestAllowedPostDate = releaseDate?.minusDays(10)
 
-        val explicitTitleNumbers = mutableSetOf<Int>()
-        for (m in Regex("\\b(\\d{1,2})\\b").findAll(coreTitle)) {
-            m.groupValues[1].toIntOrNull()?.let { explicitTitleNumbers.add(it) }
-        }
+        // Only require numbers that actually appear in the book's coreTitle!
+        val explicitTitleNumbers = Regex("\\b(\\d+)\\b").findAll(coreTitle)
+            .map { it.groupValues[1] }
+            .toSet()
 
-        val significantTitleWords = extractSignificantWords(coreTitle)
-        val significantSeriesWords = extractSignificantWords(seriesTitle)
+        val significantTitleWords = coreTitle.lowercase(Locale.US)
+            .split(Regex("[^a-z0-9]+"))
+            .filter { it.length >= 3 && it !in STOP_WORDS && !it.all { ch -> ch.isDigit() } }
 
         val authorTokens = extractAuthorVerificationTokens(allAuthors)
         val primaryAuthorFirst = allAuthors.split(",").firstOrNull()?.trim().orEmpty()
         val primaryAuthorSurname = authorTokens.firstOrNull().orEmpty()
 
-        val cleanQueryTitle = normalizeForAbbComparison(coreTitle)
-        val cleanQuerySeries = normalizeForAbbComparison(seriesTitle)
-
-        // Build candidate search queries using the exact working format
+        // Build search queries:
+        // For 1-word titles (like "Exoplanet" or "Overworld"), query "Title AuthorSurname" first so ABB doesn't return 20 unrelated sci-fi books!
+        // For multi-word titles (like "Tales from the Territory" or "He Who Fights with Monsters 13"), query coreTitle + authorSurname and coreTitle.
         val candidateQueries = linkedSetOf<String>()
-        if (primaryAuthorSurname.isNotBlank()) {
-            candidateQueries.add("$cleanQueryTitle $primaryAuthorSurname")
-        }
-        candidateQueries.add(cleanQueryTitle)
-        if (cleanQuerySeries.isNotBlank() && seriesSequence != null && seriesSequence > 0) {
-            candidateQueries.add("$cleanQuerySeries $seriesSequence $primaryAuthorSurname".trim())
+        if (significantTitleWords.size <= 1 && primaryAuthorSurname.isNotBlank()) {
+            candidateQueries.add("${coreTitle.lowercase(Locale.US)} $primaryAuthorSurname")
+            candidateQueries.add(coreTitle.lowercase(Locale.US))
+        } else {
+            if (primaryAuthorSurname.isNotBlank()) {
+                candidateQueries.add("${coreTitle.lowercase(Locale.US)} $primaryAuthorSurname")
+            }
+            candidateQueries.add(coreTitle.lowercase(Locale.US))
         }
 
-        // Broad regexes that capture any ABB post link in search results
-        val postLinkRegex = Regex(
-            "<a\\s+[^>]*href=[\"']([^\"'#?]+)[\"'][^>]*>(.*?)</a>",
+        val h2LinkRegex = Regex(
+            "<h[12][^>]*>\\s*<a\\s+[^>]*href=[\"']([^\"'#?]+)[\"'][^>]*>(.*?)</a>\\s*</h[12]>",
+            setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+        )
+        val fallbackBookLinkRegex = Regex(
+            "<a\\s+[^>]*href=[\"']((?:https?://[^\"'/]+)?/(?:audio-books|abss)/[^\"'#?]+)[\"'][^>]*>(.*?)</a>",
             setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
         )
         val infoHashRegex = Regex(
-            "Info\\s*Hash[^a-fA-F0-9]{1,120}([a-fA-F0-9]{40})",
+            "Info\\s*Hash\\s*:?\\s*</t[dh]>\\s*<td[^>]*>\\s*([a-fA-F0-9]{40})\\s*</td>",
             setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
         )
         val fallbackHashRegex = Regex("\\b([a-fA-F0-9]{40})\\b")
 
-        var anyMirrorReached = false
-        var totalPostsInspected = 0
-
-        for (mirror in getOrderedAbbMirrors()) {
-            var mirrorServedAbbHtml = false
+        for (mirror in ABB_MIRRORS) {
+            var mirrorServedValidAbbPage = false
             for (qRaw in candidateQueries) {
                 val encodedQ = URLEncoder.encode(qRaw, "UTF-8")
-                // Restored exact working search URL format with &cat=undefined%2Cundefined
-                val searchUrl = URL("$mirror/?s=$encodedQ&cat=undefined%2Cundefined")
-                val searchHtml = fetchAbbPageHtml(
+                val searchUrl = URL("$mirror/?s=$encodedQ")
+                val searchHtml = executeGetWithRetry(
                     url = searchUrl,
-                    refererUrl = "$mirror/"
+                    acceptHtml = true,
+                    originUrl = mirror
                 ) ?: continue
 
+                // Only count as a real ABB page (not a Cloudflare challenge) if it contains ABB's layout markers
                 if (searchHtml.contains("postTitle", ignoreCase = true) ||
-                    searchHtml.contains("/audio-books/", ignoreCase = true) ||
-                    searchHtml.contains("/abss/", ignoreCase = true) ||
-                    searchHtml.contains("audiobookbay", ignoreCase = true)
+                    searchHtml.contains("audiobookbay", ignoreCase = true) && searchHtml.contains("id=\"content\"", ignoreCase = true)
                 ) {
-                    anyMirrorReached = true
-                    mirrorServedAbbHtml = true
-                    preferredAbbMirror = mirror
+                    mirrorServedValidAbbPage = true
                 }
 
-                for (match in postLinkRegex.findAll(searchHtml)) {
-                    val rawHref = match.groupValues.getOrNull(1)?.trim().orEmpty()
-                    // Only inspect links that point to an audiobook post (either /audio-books/..., /abss/..., or inside a postTitle heading)
-                    val windowBeforeStart = (match.range.first - 120).coerceAtLeast(0)
-                    val prefixContext = searchHtml.substring(windowBeforeStart, match.range.first)
-                    val isPostLink = rawHref.contains("/audio-books/", ignoreCase = true) ||
-                        rawHref.contains("/abss/", ignoreCase = true) ||
-                        prefixContext.contains("postTitle", ignoreCase = true) ||
-                        prefixContext.contains("<h2", ignoreCase = true) ||
-                        prefixContext.contains("<h1", ignoreCase = true)
+                val linkMatches = h2LinkRegex.findAll(searchHtml).toList().ifEmpty {
+                    fallbackBookLinkRegex.findAll(searchHtml).toList()
+                }
 
-                    if (!isPostLink || rawHref == "/" || rawHref.contains("/page/") || rawHref.contains("/category/") || rawHref.contains("/tag/") || rawHref.contains("javascript:")) {
+                for (match in linkMatches) {
+                    val rawHref = match.groupValues.getOrNull(1)?.trim().orEmpty()
+                    if (rawHref.isBlank() || rawHref == "/" || rawHref.contains("/page/") || rawHref.contains("/category/")) {
                         continue
                     }
 
                     val rawAnchorHtml = match.groupValues.getOrNull(2).orEmpty()
-                    val linkTitleRaw = HtmlCompat.fromHtml(rawAnchorHtml, HtmlCompat.FROM_HTML_MODE_COMPACT).toString().trim()
-                    if (linkTitleRaw.length < 3 || linkTitleRaw.equals("Read more", ignoreCase = true)) continue
-
-                    totalPostsInspected++
-                    val linkTitleNorm = normalizeForAbbComparison(linkTitleRaw)
+                    val linkTitle = HtmlCompat.fromHtml(rawAnchorHtml, HtmlCompat.FROM_HTML_MODE_COMPACT)
+                        .toString()
+                        .lowercase(Locale.US)
 
                     val windowStart = match.range.first.coerceAtLeast(0)
-                    val windowEnd = (match.range.last + 1500).coerceAtMost(searchHtml.length)
+                    val windowEnd = (match.range.last + 1400).coerceAtMost(searchHtml.length)
                     val postContextPlain = HtmlCompat.fromHtml(
                         searchHtml.substring(windowStart, windowEnd),
                         HtmlCompat.FROM_HTML_MODE_COMPACT
                     ).toString()
-                    val postContextNorm = normalizeForAbbComparison(postContextPlain)
+                    val postContextLower = postContextPlain.lowercase(Locale.US)
 
-                    if (englishOnly && isForeignLanguageAbbPost(postContextPlain, linkTitleRaw)) {
+                    // 1. Check that all significant title words appear as whole words in the ABB post title
+                    val wordsMatch = significantTitleWords.isNotEmpty() && significantTitleWords.all { w ->
+                        Regex("\\b${Regex.escape(w)}\\b").containsMatchIn(linkTitle)
+                    }
+
+                    // 2. If the book's own title contains a number (e.g., "13"), require that exact number in linkTitle
+                    val numbersMatch = explicitTitleNumbers.all { num ->
+                        val padded = num.padStart(2, '0')
+                        Regex("\\b(?:$num|$padded)\\b").containsMatchIn(linkTitle)
+                    }
+
+                    // 3. Strict Author-Only Word-Boundary Check (never narrator or cast names!)
+                    val authorMatches = authorTokens.isNotEmpty() && authorTokens.any { authTok ->
+                        val boundary = Regex("\\b${Regex.escape(authTok)}\\b")
+                        boundary.containsMatchIn(linkTitle) || boundary.containsMatchIn(postContextLower)
+                    }
+
+                    // 4. ABB Posted Date Check on search snippet (if present): reject uploads posted >10 days before Audible releaseDateIso
+                    val snippetPostedDate = parseAbbPostedDate(postContextPlain)
+                    if (earliestAllowedPostDate != null && snippetPostedDate != null && snippetPostedDate.isBefore(earliestAllowedPostDate)) {
                         continue
                     }
 
-                    // 1. Title word match: allow 1 word tolerance on 3+ word titles
-                    val matchedWordCount = significantTitleWords.count { w -> linkTitleNorm.contains(w) }
-                    val requiredWordCount = if (significantTitleWords.size >= 3) {
-                        significantTitleWords.size - 1
-                    } else {
-                        significantTitleWords.size
-                    }
-                    val bookWordsMatch = significantTitleWords.isNotEmpty() && matchedWordCount >= requiredWordCount
-                    val explicitNumbersMatch = explicitTitleNumbers.all { num ->
-                        containsEquivalentNumber(linkTitleNorm, num)
-                    }
-                    val primaryTitleMatch = bookWordsMatch && explicitNumbersMatch
-
-                    // 2. Series fallback match
-                    val seriesFallbackMatch = significantSeriesWords.isNotEmpty() &&
-                        seriesSequence != null &&
-                        seriesSequence > 0 &&
-                        significantSeriesWords.all { w -> linkTitleNorm.contains(w) } &&
-                        containsEquivalentNumber(linkTitleNorm, seriesSequence)
-
-                    // 3. Author verification: check if any author token appears in the link title or post card context
-                    val authorMatches = authorTokens.isEmpty() || authorTokens.any { authTok ->
-                        linkTitleNorm.contains(authTok) || postContextNorm.contains(authTok)
-                    }
-
-                    // 4. Year guard against old books with the same title (e.g. 2019 Exoplanet vs 2026 Exoplanet)
-                    val snippetYear = extractAbbPostedYear(postContextPlain)
-                    if (releaseYear != null && snippetYear != null && snippetYear < (releaseYear - 1)) {
-                        continue
-                    }
-
-                    if ((primaryTitleMatch || seriesFallbackMatch) && authorMatches) {
+                    if (wordsMatch && numbersMatch && authorMatches) {
                         val fullPostUrl = when {
                             rawHref.startsWith("http") -> rawHref
                             rawHref.startsWith("/") -> "$mirror$rawHref"
@@ -488,14 +354,16 @@ object AudibleApiClient {
                         }
 
                         var magnetUri = ""
-                        val postHtml = fetchAbbPageHtml(
+                        val postHtml = executeGetWithRetry(
                             url = URL(fullPostUrl),
-                            refererUrl = searchUrl.toString()
+                            acceptHtml = true,
+                            originUrl = mirror
                         )
                         if (postHtml != null) {
                             val postPlain = HtmlCompat.fromHtml(postHtml, HtmlCompat.FROM_HTML_MODE_COMPACT).toString()
-                            val detailYear = extractAbbPostedYear(postPlain)
-                            if (releaseYear != null && detailYear != null && detailYear < (releaseYear - 1)) {
+                            val detailPostedDate = parseAbbPostedDate(postPlain)
+                            if (earliestAllowedPostDate != null && detailPostedDate != null && detailPostedDate.isBefore(earliestAllowedPostDate)) {
+                                // False positive from an older book with the same title! Skip it.
                                 continue
                             }
 
@@ -503,34 +371,25 @@ object AudibleApiClient {
                                 ?: fallbackHashRegex.find(postHtml)?.groupValues?.getOrNull(1)
                                 ?: ""
                             if (hash.length == 40) {
-                                magnetUri = buildEnrichedMagnetUri(
-                                    infoHash = hash,
-                                    displayName = "$coreTitle - $primaryAuthorFirst",
-                                    postHtml = postHtml
-                                )
+                                val dn = URLEncoder.encode("$coreTitle - $primaryAuthorFirst", "UTF-8")
+                                magnetUri = "magnet:?xt=urn:btih:${hash.lowercase(Locale.US)}&dn=$dn"
                             }
                         }
 
                         return@withContext AbbMatchResult(
                             available = true,
                             postUrl = fullPostUrl,
-                            magnetUri = magnetUri,
-                            diagnosticMessage = "[ Found on ABB! Magnet ready ]"
+                            magnetUri = magnetUri
                         )
                     }
                 }
             }
-            if (mirrorServedAbbHtml && totalPostsInspected > 0) {
+            if (mirrorServedValidAbbPage) {
                 break
             }
         }
 
-        val diag = if (!anyMirrorReached) {
-            "[ ABB: Mirror blocked or unreachable ]"
-        } else {
-            "[ ABB: No match in $totalPostsInspected post(s) ]"
-        }
-        AbbMatchResult(false, diagnosticMessage = diag)
+        AbbMatchResult(false)
     }
 
     suspend fun getCacheStats(): CacheStats = withContext(Dispatchers.IO) {
@@ -559,7 +418,6 @@ object AudibleApiClient {
                 File(base, "audible_catalog_json"),
                 File(base, "audible_catalog_json_v19"),
                 File(base, "audible_catalog_json_v24"),
-                File(base, "audible_catalog_json_v26"),
                 File(base, "covers")
             ).forEach { folder ->
                 folder.listFiles()?.forEach { f -> runCatching { f.delete() } }
@@ -590,8 +448,6 @@ object AudibleApiClient {
                 val arr = JSONArray(audnexSearchJson)
                 for (i in 0 until arr.length().coerceAtMost(5)) {
                     val obj = arr.optJSONObject(i) ?: continue
-                    val candName = cleanContributorName(obj.optString("name", ""))
-                    if (!candName.equals(cleaned, ignoreCase = true)) continue
                     val directImg = obj.optString("image", "").trim()
                     if (directImg.startsWith("https://")) {
                         personPortraitCache.put(cacheKey, directImg)
@@ -660,7 +516,7 @@ object AudibleApiClient {
             )
             val html = executeGetWithRetry(authorPageUrl, acceptHtml = true)
             if (html != null) {
-                val extracted = extractAuthorImageFromAudibleHtml(html, cleaned)
+                val extracted = extractAuthorImageFromAudibleHtml(html)
                 if (extracted.startsWith("https://")) {
                     personPortraitCache.put(cacheKey, extracted)
                     return@withContext extracted
@@ -671,40 +527,24 @@ object AudibleApiClient {
         null
     }
 
-    private fun extractAuthorImageFromAudibleHtml(html: String, authorName: String): String {
-        val heroHeaderHtml = html
-            .substringBefore("Listeners also enjoy")
-            .substringBefore("listeners-also-enjoy")
-            .substringBefore("similar-authors")
-            .substringBefore("Best Sellers")
-            .substringBefore("Most popular")
-
+    private fun extractAuthorImageFromAudibleHtml(html: String): String {
         val amznAuthorMedia = Regex(
             "https://(?:m\\.media-amazon\\.com|images-na\\.ssl-images-amazon\\.com)/images/S/amzn-author-media[^\"'\\s>]*"
-        ).find(heroHeaderHtml)?.value.orEmpty()
+        ).find(html)?.value.orEmpty()
         if (amznAuthorMedia.startsWith("https://")) return amznAuthorMedia
 
         val ogRegex = Regex("<meta\\s+[^>]*property=[\"']og:image[\"'][^>]*content=[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
         val ogReverseRegex = Regex("<meta\\s+[^>]*content=[\"']([^\"']+)[\"'][^>]*property=[\"']og:image[\"']", RegexOption.IGNORE_CASE)
-        val ogUrl = ogRegex.find(heroHeaderHtml)?.groupValues?.getOrNull(1)
-            ?: ogReverseRegex.find(heroHeaderHtml)?.groupValues?.getOrNull(1)
+        val ogUrl = ogRegex.find(html)?.groupValues?.getOrNull(1)
+            ?: ogReverseRegex.find(html)?.groupValues?.getOrNull(1)
             ?: ""
         if (isValidAudibleAuthorPortraitUrl(ogUrl)) return ogUrl
 
-        val imgTagRegex = Regex(
-            "<img\\s+[^>]*src=[\"'](https://(?:m\\.media-amazon\\.com|images-na\\.ssl-images-amazon\\.com)/images/I/[^\"'\\s>]*_RO\\d+[^\"'\\s>]*\\.(?:jpg|jpeg|png))[\"'][^>]*>",
-            RegexOption.IGNORE_CASE
-        )
-        val authorSurname = authorName.trim().split(" ").lastOrNull()?.lowercase(Locale.US).orEmpty()
-        for (match in imgTagRegex.findAll(heroHeaderHtml)) {
-            val fullImgTag = match.value.lowercase(Locale.US)
-            val candidateUrl = match.groupValues.getOrNull(1).orEmpty()
-            val altMatch = Regex("alt=[\"']([^\"']+)[\"']").find(fullImgTag)?.groupValues?.getOrNull(1).orEmpty()
-            if (altMatch.isNotBlank() && authorSurname.length >= 3 && !altMatch.contains(authorSurname)) {
-                continue
-            }
-            if (isValidAudibleAuthorPortraitUrl(candidateUrl)) {
-                return candidateUrl
+        val imgRegex = Regex("https://(?:m\\.media-amazon\\.com|images-na\\.ssl-images-amazon\\.com)/images/I/[^\"'\\s>]*_RO\\d+[^\"'\\s>]*\\.(?:jpg|jpeg|png)")
+        for (match in imgRegex.findAll(html)) {
+            val candidate = match.value
+            if (isValidAudibleAuthorPortraitUrl(candidate)) {
+                return candidate
             }
         }
         return ""
@@ -853,7 +693,7 @@ object AudibleApiClient {
     private suspend fun executeGetWithRetry(
         url: URL,
         acceptHtml: Boolean = false,
-        refererUrl: String? = null
+        originUrl: String? = null
     ): String? {
         repeat(2) { attempt ->
             var shouldRetry = false
@@ -868,15 +708,20 @@ object AudibleApiClient {
                 )
                 setRequestProperty("Accept-Language", "en-US,en;q=0.9")
                 setRequestProperty("Accept-Encoding", "gzip")
-                if (refererUrl != null) {
-                    setRequestProperty("Referer", refererUrl)
+                if (originUrl != null) {
+                    setRequestProperty("Origin", originUrl)
+                    setRequestProperty("Referer", "$originUrl/")
+                    setRequestProperty("Upgrade-Insecure-Requests", "1")
+                    setRequestProperty("Sec-Fetch-Dest", "document")
+                    setRequestProperty("Sec-Fetch-Mode", "navigate")
+                    setRequestProperty("Sec-Fetch-Site", "same-origin")
                 }
                 setRequestProperty(
                     "User-Agent",
                     if (acceptHtml) {
                         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
                     } else {
-                        "NocturneTXT/3.3 (Android)"
+                        "NocturneTXT/2.9 (Android)"
                     }
                 )
             }

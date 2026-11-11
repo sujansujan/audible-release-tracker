@@ -1,207 +1,162 @@
 package com.plaintext.audible.worker
 
-import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.os.Build
+import android.net.Uri
 import androidx.core.app.NotificationCompat
-import androidx.core.app.NotificationManagerCompat
-import androidx.core.content.ContextCompat
-import androidx.work.Constraints
-import androidx.work.CoroutineWorker
-import androidx.work.ExistingPeriodicWorkPolicy
-import androidx.work.ExistingWorkPolicy
-import androidx.work.NetworkType
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.PeriodicWorkRequestBuilder
-import androidx.work.WorkManager
-import androidx.work.WorkerParameters
-import com.plaintext.audible.MainActivity
-import com.plaintext.audible.R
+import androidx.work.*
 import com.plaintext.audible.data.ReleaseEntity
 import com.plaintext.audible.data.ReleaseRepository
+import java.net.URLEncoder
 import java.time.Duration
+import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.temporal.ChronoUnit
 import java.util.concurrent.TimeUnit
 
 class ReleaseCheckWorker(
-    private val appContext: Context,
+    appContext: Context,
     params: WorkerParameters
 ) : CoroutineWorker(appContext, params) {
 
     override suspend fun doWork(): Result {
-        ensureChannels(appContext)
-        val repo = ReleaseRepository(appContext)
+        val repo = ReleaseRepository(applicationContext)
+        val releases = repo.syncCatalog(forceRefresh = true)
+        val domain = repo.getPrefs().marketplace.domain
+        val today = LocalDate.now()
 
-        return try {
-            val batch = repo.syncCatalog(forceRefresh = true)
+        ensureChannel()
 
-            for (rel in batch.sevenDayOut) {
-                postReleaseNotification(
-                    rel = rel,
-                    channelId = CHANNEL_UPCOMING,
-                    badge = "[T-7 DAYS]",
-                    headline = "${rel.title} (${rel.releaseDateIso})"
-                )
-                repo.markNotified(rel.asin, sevenDay = true, releaseDay = rel.notifiedReleaseDay)
+        for (rel in releases) {
+            val relDate = runCatching { LocalDate.parse(rel.releaseDateIso) }.getOrNull() ?: continue
+            val daysUntil = ChronoUnit.DAYS.between(today, relDate)
+
+            if (daysUntil == 7L && !rel.notifiedSevenDay) {
+                sendReleaseNotification(rel, domain, tag = "[T-7 DAYS]", targetUrl = null)
+                repo.dao.updateNotificationFlags(rel.asin, sevenDay = true, releaseDay = rel.notifiedReleaseDay)
+            } else if (daysUntil == 0L && !rel.notifiedReleaseDay) {
+                sendReleaseNotification(rel, domain, tag = "[OUT TODAY]", targetUrl = null)
+                repo.dao.updateNotificationFlags(rel.asin, sevenDay = rel.notifiedSevenDay, releaseDay = true)
             }
 
-            for (rel in batch.releaseDay) {
-                postReleaseNotification(
+            if (rel.abbAvailable && !rel.notifiedAbbAvailable) {
+                sendReleaseNotification(
                     rel = rel,
-                    channelId = CHANNEL_RELEASE_DAY,
-                    badge = "[OUT TODAY]",
-                    headline = "${rel.title} — ${rel.authors}"
+                    domain = domain,
+                    tag = "[ON ABB]",
+                    targetUrl = rel.abbPostUrl.ifBlank { null }
                 )
-                repo.markNotified(rel.asin, sevenDay = true, releaseDay = true)
+                repo.dao.updateAbbNotifiedFlag(rel.asin, notified = true)
             }
-
-            for (rel in batch.narratorRevealed) {
-                postReleaseNotification(
-                    rel = rel,
-                    channelId = CHANNEL_UPCOMING,
-                    badge = "[NARRATOR ANNOUNCED]",
-                    headline = "${rel.title} narrated by ${rel.narrators}"
-                )
-            }
-
-            Result.success()
-        } catch (_: Exception) {
-            Result.retry()
         }
+        return Result.success()
     }
 
-    private fun postReleaseNotification(
-        rel: ReleaseEntity,
-        channelId: String,
-        badge: String,
-        headline: String
-    ) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(appContext, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            return
+    private fun ensureChannel() {
+        val nm = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            "Release & ABB Alerts (T-7d, T-0d, ABB)",
+            NotificationManager.IMPORTANCE_DEFAULT
+        ).apply {
+            description = "Notifications 1 week before, on release day, and when found on AudioBookBay"
         }
+        nm.createNotificationChannel(channel)
+    }
 
-        val notifId = rel.asin.hashCode()
-        val openIntent = Intent(appContext, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+    private fun sendReleaseNotification(
+        rel: ReleaseEntity,
+        domain: String,
+        tag: String,
+        targetUrl: String?
+    ) {
+        val nm = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val notifId = (rel.asin + tag).hashCode()
+
+        val title = "$tag ${rel.title}"
+        val seriesPart = if (rel.seriesTitle.isNotBlank()) " (${rel.seriesTitle})" else ""
+        val body = "By ${rel.authors} • Narrated by ${rel.narrators}$seriesPart"
+
+        val url = targetUrl ?: run {
+            val query = URLEncoder.encode("${rel.title} ${rel.authors.split(",").firstOrNull().orEmpty()}", "UTF-8")
+            "https://www.$domain/search?keywords=$query&ipRedirectOverride=true&overrideBaseCountry=true"
         }
-        val pendingOpen = PendingIntent.getActivity(
-            appContext,
+        val viewIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+        val contentPending = PendingIntent.getActivity(
+            applicationContext,
             notifId,
-            openIntent,
+            viewIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val muteBookIntent = Intent(appContext, NotificationMuteReceiver::class.java).apply {
+        val muteBookIntent = Intent(applicationContext, NotificationMuteReceiver::class.java).apply {
             action = NotificationMuteReceiver.ACTION_MUTE_BOOK
             putExtra(NotificationMuteReceiver.EXTRA_NOTIFICATION_ID, notifId)
             putExtra(NotificationMuteReceiver.EXTRA_ASIN, rel.asin)
             putExtra(NotificationMuteReceiver.EXTRA_BOOK_TITLE, rel.title)
         }
-        val pendingMuteBook = PendingIntent.getBroadcast(
-            appContext,
-            (rel.asin + "_mute_book").hashCode(),
+        val muteBookPending = PendingIntent.getBroadcast(
+            applicationContext,
+            notifId + 1,
             muteBookIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val seriesLine = if (rel.seriesTitle.isNotBlank()) {
-            val seqStr = rel.seriesSequence?.let { " #$it" }.orEmpty()
-            "Series: ${rel.seriesTitle}$seqStr • "
-        } else ""
-        val body = "${seriesLine}Author: ${rel.authors} • Narrator: ${rel.narrators}"
-
-        val builder = NotificationCompat.Builder(appContext, channelId)
-            .setSmallIcon(R.drawable.ic_stat_pts_book)
-            .setContentTitle("$badge $headline")
+        val builder = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
+            .setSmallIcon(com.plaintext.audible.R.drawable.ic_stat_pts_book)
+            .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setContentIntent(pendingOpen)
+            .setContentIntent(contentPending)
             .setAutoCancel(true)
-            .addAction(0, "DND Book", pendingMuteBook)
+            .addAction(0, "[ Mute Book ]", muteBookPending)
 
         if (rel.seriesTitle.isNotBlank()) {
-            val muteSeriesIntent = Intent(appContext, NotificationMuteReceiver::class.java).apply {
+            val muteSeriesIntent = Intent(applicationContext, NotificationMuteReceiver::class.java).apply {
                 action = NotificationMuteReceiver.ACTION_MUTE_SERIES
                 putExtra(NotificationMuteReceiver.EXTRA_NOTIFICATION_ID, notifId)
                 putExtra(NotificationMuteReceiver.EXTRA_SERIES_KEY, rel.seriesTitle)
             }
-            val pendingMuteSeries = PendingIntent.getBroadcast(
-                appContext,
-                (rel.asin + "_mute_series").hashCode(),
+            val muteSeriesPending = PendingIntent.getBroadcast(
+                applicationContext,
+                notifId + 2,
                 muteSeriesIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
-            builder.addAction(0, "DND Series", pendingMuteSeries)
+            builder.addAction(0, "[ Mute Series ]", muteSeriesPending)
         }
 
-        NotificationManagerCompat.from(appContext).notify(notifId, builder.build())
+        nm.notify(notifId, builder.build())
     }
 
     companion object {
-        private const val UNIQUE_DAILY_WORK = "pts_audible_daily_check"
-        private const val UNIQUE_IMMEDIATE_WORK = "pts_audible_immediate_check"
-        const val CHANNEL_UPCOMING = "pts_channel_upcoming"
-        const val CHANNEL_RELEASE_DAY = "pts_channel_release_day"
+        private const val CHANNEL_ID = "pts_audible_releases"
+        private const val WORK_NAME = "pts_audible_daily_check"
 
-        fun ensureChannels(context: Context) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                val c1 = NotificationChannel(
-                    CHANNEL_UPCOMING,
-                    "Upcoming Releases & Narrator Updates",
-                    NotificationManager.IMPORTANCE_HIGH
-                )
-                val c2 = NotificationChannel(
-                    CHANNEL_RELEASE_DAY,
-                    "Release Day Alerts",
-                    NotificationManager.IMPORTANCE_HIGH
-                )
-                nm.createNotificationChannels(listOf(c1, c2))
-            }
-        }
-
-        fun scheduleDailyCheck(context: Context, targetHour: Int = 9, targetMinute: Int = 0) {
-            ensureChannels(context)
+        fun scheduleDailyCheck(context: Context, targetHour: Int, targetMinute: Int) {
             val now = LocalDateTime.now()
-            var nextRun = now.withHour(targetHour.coerceIn(0, 23))
-                .withMinute(targetMinute.coerceIn(0, 59))
-                .withSecond(0)
+            var nextRun = now.withHour(targetHour).withMinute(targetMinute).withSecond(0)
             if (!nextRun.isAfter(now)) {
                 nextRun = nextRun.plusDays(1)
             }
-            val initialDelayMinutes = Duration.between(now, nextRun).toMinutes().coerceAtLeast(1L)
+            val initialDelayMinutes = Duration.between(now, nextRun).toMinutes().coerceAtLeast(1)
 
             val constraints = Constraints.Builder()
                 .setRequiredNetworkType(NetworkType.CONNECTED)
                 .build()
 
-            val request = PeriodicWorkRequestBuilder<ReleaseCheckWorker>(24, TimeUnit.HOURS)
+            val workRequest = PeriodicWorkRequestBuilder<ReleaseCheckWorker>(24, TimeUnit.HOURS)
                 .setInitialDelay(initialDelayMinutes, TimeUnit.MINUTES)
                 .setConstraints(constraints)
                 .build()
 
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
-                UNIQUE_DAILY_WORK,
+                WORK_NAME,
                 ExistingPeriodicWorkPolicy.UPDATE,
-                request
-            )
-        }
-
-        fun runImmediateCheck(context: Context) {
-            ensureChannels(context)
-            val req = OneTimeWorkRequestBuilder<ReleaseCheckWorker>().build()
-            WorkManager.getInstance(context).enqueueUniqueWork(
-                UNIQUE_IMMEDIATE_WORK,
-                ExistingWorkPolicy.REPLACE,
-                req
+                workRequest
             )
         }
     }
