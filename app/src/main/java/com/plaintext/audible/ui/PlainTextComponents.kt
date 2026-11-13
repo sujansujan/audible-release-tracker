@@ -4,7 +4,6 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.provider.Settings
 import android.util.LruCache
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -15,12 +14,13 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
@@ -28,6 +28,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -63,11 +64,17 @@ val StandardThumbnailSize = 56.dp
 
 private const val MONO_FONT_FEATURES = "liga 0, calt 0"
 
+@Immutable
+data class AsciiGridMetrics(
+    val cols: Int,
+    val cellWidthPx: Int
+)
+
 @Composable
-fun BoxWithConstraintsScope.rememberAsciiCols(
+fun BoxWithConstraintsScope.rememberAsciiMetrics(
     fontSizeSp: Int = 12,
     bold: Boolean = false
-): Int {
+): AsciiGridMetrics {
     val tm = rememberTextMeasurer()
     val style = remember(fontSizeSp, bold) {
         TextStyle(
@@ -80,8 +87,15 @@ fun BoxWithConstraintsScope.rememberAsciiCols(
     val cellPx = remember(style) {
         tm.measure("M", style).size.width.coerceAtLeast(1)
     }
-    return (constraints.maxWidth / cellPx).coerceAtLeast(16)
+    val cols = (constraints.maxWidth / cellPx).coerceAtLeast(16)
+    return AsciiGridMetrics(cols = cols, cellWidthPx = cellPx)
 }
+
+@Composable
+fun BoxWithConstraintsScope.rememberAsciiCols(
+    fontSizeSp: Int = 12,
+    bold: Boolean = false
+): Int = rememberAsciiMetrics(fontSizeSp, bold).cols
 
 @Composable
 fun rememberAsciiSpinner(active: Boolean): String {
@@ -212,7 +226,7 @@ fun CoverThumbnail(
 
 /**
  * Full-width column-measured ASCII section banner:
- * `+=== NOVEMBER 2026 (4 RELEASES • 68H 20M) ========+`
+ * `+=== NOVEMBER 2026 (1 RELEASE • 24H 10M) =========+`
  */
 @Composable
 fun AsciiSectionHeader(
@@ -248,7 +262,7 @@ fun AsciiSectionHeader(
 }
 
 /**
- * Full-width column-measured ASCII character rule (`- - - - - -` or `────────────`)
+ * Full-width column-measured ASCII character rule (`- - - - - -`)
  * replacing Material HorizontalDivider inside cards and sections.
  */
 @Composable
@@ -311,7 +325,7 @@ fun AsciiLeaderRow(
             withStyle(SpanStyle(color = keyColor, fontWeight = FontWeight.Normal)) {
                 append(cleanKey)
             }
-            withStyle(SpanStyle(color = palette.surfaceLine, fontWeight = FontWeight.Normal)) {
+            withStyle(SpanStyle(color = palette.comment.copy(alpha = 0.55f), fontWeight = FontWeight.Normal)) {
                 append(" $dots ")
             }
             withStyle(
@@ -341,7 +355,7 @@ fun AsciiLeaderRow(
 
 /**
  * Full-width dotted-leader interactive boolean switch row for Settings:
- * `English Language Only ................... [x] ON `
+ * `English Language Only ................... [x] on `
  */
 @Composable
 fun AsciiToggleRow(
@@ -354,7 +368,7 @@ fun AsciiToggleRow(
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
 
-    val stateToken = if (checked) "[x] ON " else "[ ] OFF"
+    val stateToken = if (checked) "[x] on " else "[ ] off"
     val stateColor = if (checked) palette.green else palette.comment
     val rowBg = if (isPressed) palette.surfaceLine.copy(alpha = 0.55f) else Color.Transparent
 
@@ -362,7 +376,7 @@ fun AsciiToggleRow(
         contentAlignment = Alignment.CenterStart,
         modifier = modifier
             .fillMaxWidth()
-            .defaultMinSize(minHeight = 40.dp)
+            .defaultMinSize(minHeight = 38.dp)
             .background(rowBg)
             .clickable(
                 interactionSource = interactionSource,
@@ -370,12 +384,12 @@ fun AsciiToggleRow(
                 role = Role.Checkbox,
                 onClick = onToggle
             )
-            .padding(vertical = 4.dp)
+            .padding(vertical = 3.dp)
             .clearAndSetSemantics {
                 contentDescription = "$label, ${if (checked) "on" else "off"}"
             }
     ) {
-        val cols = rememberAsciiCols(fontSizeSp = 13, bold = false)
+        val cols = rememberAsciiCols(fontSizeSp = 12, bold = false)
         val cleanLabel = label.trim()
         val dotCount = (cols - cleanLabel.length - stateToken.length - 2).coerceAtLeast(2)
         val dots = ".".repeat(dotCount)
@@ -384,7 +398,7 @@ fun AsciiToggleRow(
             withStyle(SpanStyle(color = palette.foreground, fontWeight = FontWeight.Normal)) {
                 append(cleanLabel)
             }
-            withStyle(SpanStyle(color = palette.surfaceLine, fontWeight = FontWeight.Normal)) {
+            withStyle(SpanStyle(color = palette.comment.copy(alpha = 0.55f), fontWeight = FontWeight.Normal)) {
                 append(" $dots ")
             }
             withStyle(SpanStyle(color = stateColor, fontWeight = FontWeight.Bold)) {
@@ -395,7 +409,7 @@ fun AsciiToggleRow(
         Text(
             text = annotated,
             fontFamily = FontFamily.Monospace,
-            fontSize = 13.sp,
+            fontSize = 12.sp,
             softWrap = false,
             maxLines = 1,
             overflow = TextOverflow.Clip,
@@ -426,7 +440,7 @@ fun AsciiRadioButton(
     Box(
         contentAlignment = Alignment.CenterStart,
         modifier = modifier
-            .defaultMinSize(minHeight = 36.dp)
+            .defaultMinSize(minHeight = 34.dp)
             .background(if (isPressed) ink else Color.Transparent)
             .clickable(
                 interactionSource = interactionSource,
@@ -434,7 +448,7 @@ fun AsciiRadioButton(
                 role = Role.RadioButton,
                 onClick = onClick
             )
-            .padding(horizontal = 4.dp, vertical = 4.dp)
+            .padding(horizontal = 4.dp, vertical = 3.dp)
             .clearAndSetSemantics {
                 contentDescription = "$label, ${if (selected) "selected" else "not selected"}"
             }
@@ -516,8 +530,8 @@ fun AsciiTextField(
 }
 
 /**
- * Full-width column-measured ASCII box frame:
- * `+---[ 2026-11-18 • [ T-5d ] • [ NEW ] ]-----------+`
+ * Single-frame ASCII box (`+---[ HEADER ]---+` top border, aligned vertical side rails,
+ * and `+----------------+` bottom border) with NO redundant inner Surface top/bottom rectangle.
  */
 @Composable
 fun AsciiBox(
@@ -529,6 +543,7 @@ fun AsciiBox(
     content: @Composable ColumnScope.() -> Unit
 ) {
     val palette = LocalPtsPalette.current
+    val density = LocalDensity.current
     val clickableModifier = if (onClick != null) {
         modifier
             .fillMaxWidth()
@@ -536,44 +551,122 @@ fun AsciiBox(
     } else {
         modifier.fillMaxWidth()
     }
-    Column(modifier = clickableModifier) {
-        if (!headerLabel.isNullOrBlank()) {
-            BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-                val cols = rememberAsciiCols(fontSizeSp = 12, bold = true)
+
+    BoxWithConstraints(
+        modifier = clickableModifier.background(palette.background)
+    ) {
+        val metrics = rememberAsciiMetrics(fontSizeSp = 12, bold = true)
+        val cols = metrics.cols
+        val cellPx = metrics.cellWidthPx
+
+        val topLine = remember(headerLabel, cols) {
+            if (!headerLabel.isNullOrBlank()) {
                 val cleanHeader = headerLabel.trim()
                 val prefix = "+---[ $cleanHeader ]"
-                val padCount = (cols - prefix.length - 1).coerceAtLeast(3)
-                val fullHeader = prefix + "-".repeat(padCount) + "+"
+                val padCount = (cols - prefix.length - 1).coerceAtLeast(2)
+                prefix + "-".repeat(padCount) + "+"
+            } else {
+                "+" + "-".repeat((cols - 2).coerceAtLeast(2)) + "+"
+            }
+        }
+        val bottomLine = remember(cols) {
+            "+" + "-".repeat((cols - 2).coerceAtLeast(2)) + "+"
+        }
+
+        // Exact pixel X centers of the leading '+' and trailing '+'
+        val leftRailX = cellPx * 0.5f
+        val rightRailX = (cols - 0.5f) * cellPx
+
+        Column(modifier = Modifier.fillMaxWidth()) {
+            if (!headerLabel.isNullOrBlank()) {
+                val cleanHeader = headerLabel.trim()
+                val bracketTitle = "[ $cleanHeader ]"
+                val dashRightCount = (cols - 4 - bracketTitle.length - 1).coerceAtLeast(2)
+                val annotatedTop = buildAnnotatedString {
+                    withStyle(SpanStyle(color = borderColor, fontWeight = FontWeight.Bold)) {
+                        append("+---")
+                    }
+                    withStyle(SpanStyle(color = headerColor, fontWeight = FontWeight.Bold)) {
+                        append(bracketTitle)
+                    }
+                    withStyle(SpanStyle(color = borderColor, fontWeight = FontWeight.Bold)) {
+                        append("-".repeat(dashRightCount) + "+")
+                    }
+                }
                 Text(
-                    text = fullHeader,
+                    text = annotatedTop,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = headerColor,
                     softWrap = false,
                     maxLines = 1,
                     overflow = TextOverflow.Clip,
-                    style = TextStyle(fontFeatureSettings = MONO_FONT_FEATURES)
+                    style = TextStyle(
+                        fontFeatureSettings = MONO_FONT_FEATURES,
+                        lineHeight = 14.sp
+                    )
+                )
+            } else {
+                Text(
+                    text = topLine,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = borderColor,
+                    softWrap = false,
+                    maxLines = 1,
+                    overflow = TextOverflow.Clip,
+                    style = TextStyle(
+                        fontFeatureSettings = MONO_FONT_FEATURES,
+                        lineHeight = 14.sp
+                    )
                 )
             }
-        }
-        Surface(
-            color = palette.background,
-            border = BorderStroke(1.dp, borderColor),
-            modifier = Modifier.fillMaxWidth()
-        ) {
+
+            // Body with ONLY left and right vertical rails aligned directly under the '+' corners
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                    .drawBehind {
+                        val strokePx = with(density) { 1.dp.toPx() }
+                        val rx = rightRailX.coerceAtMost(size.width - strokePx)
+                        drawLine(
+                            color = borderColor,
+                            start = Offset(leftRailX, 0f),
+                            end = Offset(leftRailX, size.height),
+                            strokeWidth = strokePx
+                        )
+                        drawLine(
+                            color = borderColor,
+                            start = Offset(rx, 0f),
+                            end = Offset(rx, size.height),
+                            strokeWidth = strokePx
+                        )
+                    }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
                 content = content
+            )
+
+            Text(
+                text = bottomLine,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = borderColor,
+                softWrap = false,
+                maxLines = 1,
+                overflow = TextOverflow.Clip,
+                style = TextStyle(
+                    fontFeatureSettings = MONO_FONT_FEATURES,
+                    lineHeight = 14.sp
+                )
             )
         }
     }
 }
 
 /**
- * Interactive ASCII bracket button with inverse-video press feedback (`bg = ink, fg = bg`).
+ * Interactive ASCII bracket button with inverse-video press feedback (`bg = ink, fg = bg`)
+ * and `[x] label` or `[ label ]` formatting.
  */
 @Composable
 fun BracketButton(
@@ -588,12 +681,16 @@ fun BracketButton(
     val isPressed by interactionSource.collectIsPressedAsState()
 
     val ink = if (active) palette.green else color
-    val text = if (active) "[*$label*]" else "[ $label ]"
+    val text = when {
+        label.startsWith("[x]") || label.startsWith("[+") || label.startsWith("[ ]") -> label
+        active -> "[x] $label"
+        else -> "[ $label ]"
+    }
 
     Box(
         contentAlignment = Alignment.CenterStart,
         modifier = modifier
-            .defaultMinSize(minHeight = 36.dp)
+            .defaultMinSize(minHeight = 34.dp)
             .background(if (isPressed) ink else Color.Transparent)
             .clickable(
                 interactionSource = interactionSource,
@@ -601,7 +698,7 @@ fun BracketButton(
                 role = Role.Button,
                 onClick = onClick
             )
-            .padding(horizontal = 4.dp, vertical = 4.dp)
+            .padding(horizontal = 4.dp, vertical = 3.dp)
             .clearAndSetSemantics { contentDescription = label }
     ) {
         Text(
