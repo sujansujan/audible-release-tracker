@@ -12,8 +12,8 @@ android {
         applicationId = "com.plaintext.audible"
         minSdk = 26
         targetSdk = 34
-        versionCode = 19
-        versionName = "2.9.0"
+        versionCode = 20
+        versionName = "3.0.0"
     }
 
     buildTypes {

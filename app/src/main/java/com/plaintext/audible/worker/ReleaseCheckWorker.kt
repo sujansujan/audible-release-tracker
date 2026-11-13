@@ -112,7 +112,23 @@ class ReleaseCheckWorker(
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setContentIntent(contentPending)
             .setAutoCancel(true)
-            .addAction(0, "[ Mute Book ]", muteBookPending)
+
+        if (rel.abbMagnetUri.startsWith("magnet:")) {
+            val magnetIntent = Intent(applicationContext, NotificationMuteReceiver::class.java).apply {
+                action = NotificationMuteReceiver.ACTION_COPY_MAGNET
+                putExtra(NotificationMuteReceiver.EXTRA_NOTIFICATION_ID, notifId)
+                putExtra(NotificationMuteReceiver.EXTRA_MAGNET_URI, rel.abbMagnetUri)
+            }
+            val magnetPending = PendingIntent.getBroadcast(
+                applicationContext,
+                notifId + 3,
+                magnetIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            builder.addAction(0, "[ Magnet ]", magnetPending)
+        }
+
+        builder.addAction(0, "[ Mute Book ]", muteBookPending)
 
         if (rel.seriesTitle.isNotBlank()) {
             val muteSeriesIntent = Intent(applicationContext, NotificationMuteReceiver::class.java).apply {

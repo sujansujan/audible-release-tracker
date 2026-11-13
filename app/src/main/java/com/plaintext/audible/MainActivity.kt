@@ -1,13 +1,16 @@
 package com.plaintext.audible
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.plaintext.audible.data.BackupManager
@@ -21,6 +24,8 @@ import kotlinx.coroutines.withContext
 class MainActivity : ComponentActivity() {
 
     private lateinit var repo: ReleaseRepository
+    private var sharedImportPayload by mutableStateOf<String?>(null)
+    private var externalStatusBanner by mutableStateOf<String?>(null)
 
     private val requestNotifPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -35,7 +40,7 @@ class MainActivity : ComponentActivity() {
                 contentResolver.openOutputStream(uri)?.use { out ->
                     out.write(json.toByteArray(Charsets.UTF_8))
                 }
-                Toast.makeText(this@MainActivity, "[ Backup Exported ]", Toast.LENGTH_SHORT).show()
+                externalStatusBanner = "OK: BACKUP EXPORTED (.JSON)"
             }
         }
     }
@@ -53,7 +58,7 @@ class MainActivity : ComponentActivity() {
                         BackupManager.importJson(repo, raw)
                         repo.syncCatalog(forceRefresh = false)
                     }
-                    Toast.makeText(this@MainActivity, "[ Backup Restored ]", Toast.LENGTH_SHORT).show()
+                    externalStatusBanner = "OK: BACKUP RESTORED (.JSON)"
                 }
             }
         }
@@ -62,6 +67,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         repo = ReleaseRepository(applicationContext)
+
+        extractSharedTextFromIntent(intent)?.let { sharedImportPayload = it }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(
@@ -79,9 +86,34 @@ class MainActivity : ComponentActivity() {
         setContent {
             TrackerScreen(
                 repo = repo,
+                sharedImportText = sharedImportPayload,
+                onConsumeSharedImport = { sharedImportPayload = null },
+                externalStatusMessage = externalStatusBanner,
+                onConsumeExternalStatus = { externalStatusBanner = null },
                 onExportBackup = { exportLauncher.launch("nocturnetxt-backup.json") },
                 onImportBackup = { importLauncher.launch(arrayOf("application/json", "*/*")) }
             )
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        extractSharedTextFromIntent(intent)?.let { sharedImportPayload = it }
+    }
+
+    private fun extractSharedTextFromIntent(intent: Intent?): String? {
+        if (intent == null) return null
+        return when (intent.action) {
+            Intent.ACTION_SEND -> {
+                if (intent.type?.startsWith("text/") == true) {
+                    intent.getStringExtra(Intent.EXTRA_TEXT)?.trim()?.takeIf { it.isNotBlank() }
+                } else null
+            }
+            Intent.ACTION_VIEW -> {
+                intent.dataString?.trim()?.takeIf { it.isNotBlank() }
+            }
+            else -> null
         }
     }
 }

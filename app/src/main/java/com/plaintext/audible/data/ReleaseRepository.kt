@@ -7,6 +7,9 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.time.Instant
@@ -14,6 +17,7 @@ import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicInteger
 
 enum class AudibleMarketplace(val code: String, val domain: String, val label: String) {
     US("US", "audible.com", "US (.com)"),
@@ -40,27 +44,34 @@ enum class ThemeMode(val code: String, val label: String) {
 }
 
 @Immutable
+data class SyncProgressState(
+    val done: Int = 0,
+    val total: Int = 0
+)
+
+@Immutable
 data class SyncTelemetry(
     val lastSyncEpochMs: Long = 0L,
     val lastSyncSourcesCount: Int = 0,
     val lastSyncErrorCount: Int = 0,
     val lastSyncUsedCachedFallback: Boolean = false
 ) {
-    val formattedLine: String
+    val formattedTimestamp: String
         get() {
-            if (lastSyncEpochMs <= 0L) {
-                return "Last Synced: Never"
-            }
+            if (lastSyncEpochMs <= 0L) return "Never"
             val dt = Instant.ofEpochMilli(lastSyncEpochMs)
                 .atZone(ZoneId.systemDefault())
                 .toLocalDateTime()
             val fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.US)
-            val statusPart = when {
-                lastSyncUsedCachedFallback -> "OFFLINE CACHED ($lastSyncErrorCount err)"
-                lastSyncErrorCount > 0 -> "$lastSyncErrorCount net err"
-                else -> "0 errors"
-            }
-            return "Last Synced: ${dt.format(fmt)} ($lastSyncSourcesCount sources • $statusPart)"
+            return dt.format(fmt)
+        }
+
+    val statusSummary: String
+        get() = when {
+            lastSyncEpochMs <= 0L -> "IDLE"
+            lastSyncUsedCachedFallback -> "OFFLINE CACHE ($lastSyncErrorCount ERR)"
+            lastSyncErrorCount > 0 -> "$lastSyncErrorCount NET ERR"
+            else -> "OK (0 ERR)"
         }
 }
 
@@ -91,6 +102,9 @@ class ReleaseRepository(context: Context) {
         context.getSharedPreferences("pts_audible_prefs", Context.MODE_PRIVATE)
     private val syncSemaphore = Semaphore(4)
     private val abbSemaphore = Semaphore(1)
+
+    private val _syncProgress = MutableStateFlow(SyncProgressState())
+    val syncProgress: StateFlow<SyncProgressState> = _syncProgress.asStateFlow()
 
     companion object {
         private const val ABB_DAILY_INTERVAL_MS = 20L * 60L * 60L * 1000L
@@ -268,9 +282,6 @@ class ReleaseRepository(context: Context) {
         )
     }
 
-    /**
-     * Checks a single release on AudioBookBay on demand (when user taps `[ Check ABB ]` on a card).
-     */
     suspend fun checkSingleReleaseOnAbb(rel: ReleaseEntity): Boolean {
         return abbSemaphore.withPermit {
             val match = AudibleApiClient.checkAudioBookBayAvailability(
@@ -292,11 +303,6 @@ class ReleaseRepository(context: Context) {
         }
     }
 
-    /**
-     * Sequentially checks AudioBookBay at most once per day (or when forceAbbCheck = true)
-     * for already-released books (`releaseDateIso <= today`) sorted newest-first so recent
-     * releases (like He Who Fights with Monsters 13) are always checked first.
-     */
     suspend fun checkPendingAbbReleases(forceAbbCheck: Boolean = false): List<ReleaseEntity> {
         val filterPrefs = getPrefs()
         if (!filterPrefs.checkAbbDaily) return dao.getAllReleases()
@@ -353,10 +359,14 @@ class ReleaseRepository(context: Context) {
 
         val tracked = dao.getAllTrackedItems()
         if (tracked.isEmpty()) {
+            _syncProgress.value = SyncProgressState(0, 0)
             dao.clearAllReleases()
             saveSyncTelemetry(sourcesCount = 0, errorCount = 0, usedCachedFallback = false)
             return emptyList()
         }
+
+        val completedCounter = AtomicInteger(0)
+        _syncProgress.value = SyncProgressState(done = 0, total = tracked.size)
 
         val dndRules = dao.getAllDndRules()
         val existingReleases = dao.getAllReleases()
@@ -408,6 +418,8 @@ class ReleaseRepository(context: Context) {
                                 forceRefresh = forceRefresh
                             )
                         }
+                        val doneNow = completedCounter.incrementAndGet()
+                        _syncProgress.value = SyncProgressState(done = doneNow, total = tracked.size)
                         item to results
                     }
                 }

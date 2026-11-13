@@ -11,6 +11,7 @@ import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLDecoder
 import java.net.URLEncoder
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
@@ -46,6 +47,14 @@ data class AbbMatchResult(
     val available: Boolean,
     val postUrl: String = "",
     val magnetUri: String = ""
+)
+
+@Immutable
+data class SharedImportResolution(
+    val rawSharedText: String,
+    val extractedAsin: String?,
+    val extractedQuery: String,
+    val products: List<CatalogProduct>
 )
 
 @Immutable
@@ -110,6 +119,16 @@ object AudibleApiClient {
         RegexOption.IGNORE_CASE
     )
 
+    private val audiblePathAsinRegex = Regex(
+        "/(?:pd|series|author|dp|gp/product)/(?:[^/?#\\s]+/)?([A-Z0-9]{10})\\b",
+        RegexOption.IGNORE_CASE
+    )
+    private val standaloneAsinRegex = Regex("\\b(B[0-9A-Z]{9}|[0-9]{9}[0-9X])\\b")
+    private val audibleSlugRegex = Regex(
+        "/(?:pd|series|author)/([^/?#\\s]+?)(?:/[A-Z0-9]{10}|[?#]|$)",
+        RegexOption.IGNORE_CASE
+    )
+
     @Volatile
     private var rootCacheDir: File? = null
     @Volatile
@@ -123,6 +142,73 @@ object AudibleApiClient {
                 File(baseCacheDir, oldName).listFiles()?.forEach { it.delete() }
             }
         }
+    }
+
+    /**
+     * Parses shared text from Android's share sheet (Audible app, Goodreads, or browser URL)
+     * into an optional 10-character ASIN and a human-readable fallback search query.
+     */
+    fun extractSharedAsinOrQuery(sharedText: String): Pair<String?, String> {
+        val trimmed = sharedText.trim()
+        if (trimmed.isBlank()) return null to ""
+
+        val pathAsin = audiblePathAsinRegex.find(trimmed)?.groupValues?.getOrNull(1)?.uppercase(Locale.US)
+        val rawAsin = pathAsin ?: standaloneAsinRegex.find(trimmed)?.groupValues?.getOrNull(1)?.uppercase(Locale.US)
+
+        val urlSlug = audibleSlugRegex.find(trimmed)?.groupValues?.getOrNull(1)?.let { slug ->
+            runCatching { URLDecoder.decode(slug, "UTF-8") }.getOrDefault(slug)
+                .replace(Regex("-(?:Audiobook|Series|Podcast)s?$", RegexOption.IGNORE_CASE), "")
+                .replace('-', ' ')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+        }.orEmpty()
+
+        val textWithoutUrls = trimmed
+            .replace(Regex("https?://\\S+"), " ")
+            .replace(Regex("(?i)\\b(?:listen\\s+to|check\\s+out|on\\s+audible|audible\\.com|by)\\b"), " ")
+            .replace(Regex("[\"'“”‘’]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
+        val fallbackQuery = when {
+            urlSlug.isNotBlank() && !urlSlug.matches(Regex("^[A-Z0-9]{10}$", RegexOption.IGNORE_CASE)) -> urlSlug
+            textWithoutUrls.isNotBlank() -> textWithoutUrls.take(80)
+            !rawAsin.isNullOrBlank() -> rawAsin
+            else -> trimmed.take(80)
+        }
+
+        return rawAsin to fallbackQuery
+    }
+
+    /**
+     * Resolves shared text or URL into matching Audible catalog products.
+     * Tries exact ASIN lookup first; if the ASIN is a series/author container ASIN or not a direct
+     * product ASIN, falls back to a keyword catalog search using the extracted slug/title.
+     */
+    suspend fun resolveSharedInput(sharedText: String): SharedImportResolution = withContext(Dispatchers.IO) {
+        val (asin, query) = extractSharedAsinOrQuery(sharedText)
+        val results = LinkedHashMap<String, CatalogProduct>()
+
+        if (!asin.isNullOrBlank()) {
+            val direct = searchCatalog(asin = asin, numResults = 5, maxPages = 1, forceRefresh = false)
+            for (p in direct) {
+                results.putIfAbsent(p.asin, p)
+            }
+        }
+
+        if (results.isEmpty() && query.isNotBlank()) {
+            val searched = searchCatalog(titleOrSeries = query, numResults = 12, maxPages = 1, forceRefresh = false)
+            for (p in searched) {
+                results.putIfAbsent(p.asin, p)
+            }
+        }
+
+        SharedImportResolution(
+            rawSharedText = sharedText.trim(),
+            extractedAsin = asin,
+            extractedQuery = query,
+            products = results.values.toList()
+        )
     }
 
     suspend fun pruneStaleDiskCache() = withContext(Dispatchers.IO) {
@@ -178,11 +264,6 @@ object AudibleApiClient {
         }
     }
 
-    /**
-     * Extracts required author verification tokens (surnames / pen-names of each listed author,
-     * NEVER narrator names or "Full cast") so common narrator names like "Ray Porter" or "John"
-     * never cause a false positive on 1-word titles like "Exoplanet".
-     */
     internal fun extractAuthorVerificationTokens(allAuthors: String): List<String> {
         val tokens = mutableListOf<String>()
         for (authorPart in allAuthors.split(",")) {
@@ -197,32 +278,16 @@ object AudibleApiClient {
         return tokens
     }
 
-    /**
-     * Parses AudioBookBay's `Posted: DD Mmm YYYY` date (e.g. `Posted: 6 Oct 2026` or `Posted: 12 Mar 2019`)
-     * from a post snippet or details page.
-     */
     internal fun parseAbbPostedDate(text: String): LocalDate? {
         val match = Regex("Posted:\\s*(\\d{1,2}\\s+[A-Za-z]{3,9}\\s+\\d{4})", RegexOption.IGNORE_CASE)
             .find(text) ?: return null
         val rawDate = match.groupValues.getOrNull(1)?.trim()?.replace(Regex("\\s+"), " ") ?: return null
-        // Normalize month token to first 3 letters (e.g. "October" -> "Oct")
         val parts = rawDate.split(" ")
         if (parts.size != 3) return null
         val normalized = "${parts[0]} ${parts[1].take(3)} ${parts[2]}"
         return runCatching { LocalDate.parse(normalized, abbPostedDateFormatter) }.getOrNull()
     }
 
-    /**
-     * Precision AudioBookBay Availability & Magnet Checker:
-     * 1) Only requires a number in the ABB post title if that number is actually part of `coreTitle`
-     *    (fixes *Tales from the Territory*, which is `Legends & Lattes #5` on Audible but has no `5` in its title).
-     * 2) Strictly requires at least one **Author** surname/pen-name (`extractAuthorVerificationTokens(allAuthors)`)
-     *    to match as a whole word (`...`) in the ABB post title or post block—never narrator/cast names.
-     * 3) Verifies the ABB `Posted:` date against `releaseDateIso`: if an ABB upload has a `Posted:` date more than
-     *    10 days *before* the book's Audible release date, it is an older unrelated book (fixes *Exoplanet*).
-     * 4) Only marks a mirror as valid if it returned actual ABB page structure (`postTitle` / `id="content"`),
-     *    falling back across `.lu`, `.is`, `.fi`, and `.se` if Cloudflare challenges the first mirror.
-     */
     suspend fun checkAudioBookBayAvailability(
         bookTitle: String,
         allAuthors: String,
@@ -241,7 +306,6 @@ object AudibleApiClient {
         val releaseDate = runCatching { LocalDate.parse(releaseDateIso) }.getOrNull()
         val earliestAllowedPostDate = releaseDate?.minusDays(10)
 
-        // Only require numbers that actually appear in the book's coreTitle!
         val explicitTitleNumbers = Regex("\\b(\\d+)\\b").findAll(coreTitle)
             .map { it.groupValues[1] }
             .toSet()
@@ -254,9 +318,6 @@ object AudibleApiClient {
         val primaryAuthorFirst = allAuthors.split(",").firstOrNull()?.trim().orEmpty()
         val primaryAuthorSurname = authorTokens.firstOrNull().orEmpty()
 
-        // Build search queries:
-        // For 1-word titles (like "Exoplanet" or "Overworld"), query "Title AuthorSurname" first so ABB doesn't return 20 unrelated sci-fi books!
-        // For multi-word titles (like "Tales from the Territory" or "He Who Fights with Monsters 13"), query coreTitle + authorSurname and coreTitle.
         val candidateQueries = linkedSetOf<String>()
         if (significantTitleWords.size <= 1 && primaryAuthorSurname.isNotBlank()) {
             candidateQueries.add("${coreTitle.lowercase(Locale.US)} $primaryAuthorSurname")
@@ -293,7 +354,6 @@ object AudibleApiClient {
                     originUrl = mirror
                 ) ?: continue
 
-                // Only count as a real ABB page (not a Cloudflare challenge) if it contains ABB's layout markers
                 if (searchHtml.contains("postTitle", ignoreCase = true) ||
                     searchHtml.contains("audiobookbay", ignoreCase = true) && searchHtml.contains("id=\"content\"", ignoreCase = true)
                 ) {
@@ -323,24 +383,20 @@ object AudibleApiClient {
                     ).toString()
                     val postContextLower = postContextPlain.lowercase(Locale.US)
 
-                    // 1. Check that all significant title words appear as whole words in the ABB post title
                     val wordsMatch = significantTitleWords.isNotEmpty() && significantTitleWords.all { w ->
                         Regex("\\b${Regex.escape(w)}\\b").containsMatchIn(linkTitle)
                     }
 
-                    // 2. If the book's own title contains a number (e.g., "13"), require that exact number in linkTitle
                     val numbersMatch = explicitTitleNumbers.all { num ->
                         val padded = num.padStart(2, '0')
                         Regex("\\b(?:$num|$padded)\\b").containsMatchIn(linkTitle)
                     }
 
-                    // 3. Strict Author-Only Word-Boundary Check (never narrator or cast names!)
                     val authorMatches = authorTokens.isNotEmpty() && authorTokens.any { authTok ->
                         val boundary = Regex("\\b${Regex.escape(authTok)}\\b")
                         boundary.containsMatchIn(linkTitle) || boundary.containsMatchIn(postContextLower)
                     }
 
-                    // 4. ABB Posted Date Check on search snippet (if present): reject uploads posted >10 days before Audible releaseDateIso
                     val snippetPostedDate = parseAbbPostedDate(postContextPlain)
                     if (earliestAllowedPostDate != null && snippetPostedDate != null && snippetPostedDate.isBefore(earliestAllowedPostDate)) {
                         continue
@@ -363,7 +419,6 @@ object AudibleApiClient {
                             val postPlain = HtmlCompat.fromHtml(postHtml, HtmlCompat.FROM_HTML_MODE_COMPACT).toString()
                             val detailPostedDate = parseAbbPostedDate(postPlain)
                             if (earliestAllowedPostDate != null && detailPostedDate != null && detailPostedDate.isBefore(earliestAllowedPostDate)) {
-                                // False positive from an older book with the same title! Skip it.
                                 continue
                             }
 
@@ -721,7 +776,7 @@ object AudibleApiClient {
                     if (acceptHtml) {
                         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
                     } else {
-                        "NocturneTXT/2.9 (Android)"
+                        "NocturneTXT/3.0 (Android)"
                     }
                 )
             }
